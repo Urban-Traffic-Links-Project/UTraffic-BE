@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling >= 1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "utraffic-backend"
+version = "0.1.0"
+description = "UTraffic - Hệ thống phân tích tình trạng giao thông TP.HCM"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Brozic", email = "quockhanh.nguyen290804@gmail.com" }
+]
+
+dependencies = [
+    # --- Web Framework ---
+    "fastapi[standard]>=0.112.0",       # Framework chính, bao gồm Uvicorn + công cụ chuẩn
+
+    # --- Database & ORM ---
+    "sqlmodel>=0.0.16",                  # ORM hiện đại = SQLAlchemy + Pydantic
+    "psycopg[binary,pool]>=3.2.0",       # Driver PostgreSQL thế hệ 3 (async + pool)
+    "alembic>=1.13.0",                   # Quản lý DB migration
+    "geoalchemy2>=0.15.0",               # Hỗ trợ kiểu PostGIS (GEOMETRY) trong SQLAlchemy
+
+    # --- Auth & Security ---
+    "pyjwt>=2.8.0",                      # Tạo & xác thực JWT Token
+    "argon2-cffi>=23.1.0",               # Băm mật khẩu chuẩn vàng (thay bcrypt)
+
+    # --- Config & Validation ---
+    "pydantic-settings>=2.2.0",          # Đọc biến môi trường từ .env có type-check
+
+    # --- Utilities ---
+    "python-multipart>=0.0.9",           # Xử lý Form Data / Upload file
+    "redis>=5.0.0",                      # Redis client (async support)
+    "httpx>=0.27.0",                     # HTTP client cho test và internal calls
+]
+
+# ── Dev dependencies ────────────────────────────────────────────────────────
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",                     # Unit Test
+    "pytest-asyncio>=0.23.0",            # Async test support
+    "httpx>=0.27.0",                     # Test HTTP client (dùng với TestClient)
+    "ruff>=0.3.0",                       # Linter + Formatter (thay Flake8, Black, Isort)
+    "mypy>=1.9.0",                       # Static type checker
+]
+
+# ── Hatch build config ───────────────────────────────────────────────────────
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+# ── Ruff config ──────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]  # Bỏ qua cảnh báo dòng dài (đã có line-length xử lý)
+
+# ── Pytest config ────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
