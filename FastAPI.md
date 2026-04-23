@@ -70,7 +70,7 @@ uv run alembic upgrade head
 ### Bước 5: Chạy Server
 Khởi động ứng dụng FastAPI ở chế độ phát triển (tự động reload khi sửa code):
 ```bash
-uv run fastapi dev main.py
+uv run fastapi dev main.p
 ```
 *(Lưu ý: Thay `main.py` bằng tên file chứa instance `app` của bạn).*
 
