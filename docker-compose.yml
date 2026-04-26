@@ -1,21 +1,21 @@
 services:
   db:
-    image: timescale/timescaledb:latest-pg16     # 1. Tải bản cài đặt (image) này từ trên mạng về
+    image: timescale/timescaledb-ha:pg16         # 1. Image có sẵn PostGIS + TimescaleDB
     container_name: utraffic_db                  # 2. Đặt tên cho dễ nhận diện
     restart: unless-stopped                      # 3. Tự động khởi động lại nếu bị lỗi (trừ khi bạn chủ động tắt)
     
     environment: # 4. Cài đặt các biến môi trường (Tài khoản, Mật khẩu)
-      POSTGRES_USER: ${POSTGRES_USER:-utraffic} 
+      POSTGRES_USER: ${POSTGRES_USER:-admin_utraffic} 
       # Cú pháp ${A:-B} nghĩa là: Thử lấy biến A trong file .env, nếu không có thì dùng mặc định là B (utraffic).
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-utraffic_secret}
       POSTGRES_DB: ${POSTGRES_DB:-utraffic_db}
       
     ports: # 5. Mở cổng kết nối
-      - "5432:5432" 
+      - "5433:5432" 
       # "Cổng_máy_tính_của_bạn : Cổng_của_container". Nghĩa là bạn có thể dùng DBeaver/DataGrip kết nối vào localhost:5432.
       
     volumes: # 6. Gắn "ổ cứng ngoài" vào container
-      - postgres_data:/home/postgres/pgdata/data   
+      - postgres_data:/var/lib/postgresql/data   
       # Lưu dữ liệu vào ổ 'postgres_data' để lỡ có xóa container thì dữ liệu không bị mất.
       - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql  
       # Copy file SQL có sẵn ở máy bạn vào thư mục đặc biệt. Khi DB vừa chạy lên, nó sẽ tự động chạy file SQL này (thường dùng để tạo bảng).
@@ -86,7 +86,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
 
 volumes:
   postgres_data:
   redis_data:
+  pgadmin_data:
