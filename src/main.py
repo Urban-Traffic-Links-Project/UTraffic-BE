@@ -5,7 +5,9 @@ Chạy: uv run uvicorn src.main:app --reload
 """
 
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from src.core.config import get_settings
 
@@ -24,7 +26,6 @@ async def lifespan(app: FastAPI):
     # Khởi động: import models rồi tạo bảng
     print("🚀 Đang khởi động UTraffic API...")
 
- 
     # Import models để SQLModel.metadata nhận biết tất cả bảng
     import src.storage.models  # noqa: F401
     
@@ -48,6 +49,19 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+
+# ── CORS — cho phép ReactJS frontend gọi API ────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Mount API router ─────────────────────────────────────────
+from src.api.router import api_router # noqa: E402
+app.include_router(api_router)
 
 # ── Routes cơ bản ────────────────────────────────────────────
 @app.get("/", tags=["Health"])

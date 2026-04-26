@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     )
 
 
-print(f"[CONFIG] chạy thành công {BASE_URL}")
+# print(f"[CONFIG] chạy thành công {BASE_URL}")
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
