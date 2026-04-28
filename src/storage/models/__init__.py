@@ -26,12 +26,12 @@ from src.storage.models.graph import (
 )
 
 # Nhóm 4: ML (phụ thuộc GraphSnapshot, Node)
-from src.storage.models.ml import (
-    CongestionLabel,
-    ModelHorizonMetric,
-    ModelVersion,
-    Prediction,
-)
+# from src.storage.models.ml import (
+#     CongestionLabel,
+#     ModelHorizonMetric,
+#     ModelVersion,
+#     Prediction,
+# )
 
 # Nhóm 3: Traffic (phụ thuộc Edge)
 from src.storage.models.traffic import HourlyTrafficStat, TrafficObservation
@@ -51,10 +51,10 @@ __all__ = [
     "TrafficObservation",
     "HourlyTrafficStat",
     # ML
-    "ModelVersion",
-    "ModelHorizonMetric",
-    "Prediction",
-    "CongestionLabel",
+    # "ModelVersion",
+    # "ModelHorizonMetric",
+    # "Prediction",
+    # "CongestionLabel",
     # Correlation
     "CorrelationSnapshot",
     "NodeCorrelation",

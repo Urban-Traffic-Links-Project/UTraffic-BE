@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from geoalchemy2 import Geometry
 from sqlalchemy import Column
-from sqlmodel import Field, Relationship, SQLModel
+from sqlmodel import BigInteger, Field, Relationship, SQLModel
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -36,8 +36,6 @@ class GraphSnapshot(SQLModel, table=True):
     is_active: bool = Field(default=False)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    model_versions: list["ModelVersion"] = Relationship(back_populates="snapshot")
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BẢNG 5: nodes
@@ -51,7 +49,7 @@ class Node(SQLModel, table=True):
     __tablename__ = "nodes"
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    osm_node_id: int = Field(unique=True, index=True)  # ID node trong OpenStreetMap
+    osm_node_id: int = Field(sa_column=Column(BigInteger, unique=True, index=True))  # ID node trong OpenStreetMap
     node_index: int = Field(index=True)  # Vị trí trong tensor
     lat: float = Field()
     lon: float = Field()

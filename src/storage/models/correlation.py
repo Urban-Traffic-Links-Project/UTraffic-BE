@@ -31,17 +31,14 @@ class CorrelationSnapshot(SQLModel, table=True):
     __tablename__ = "correlation_snapshots"
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    model_version_id: uuid.UUID = Field(foreign_key="model_versions.id", index=True)
-    method: str = Field(default="detrended_pearson", max_length=100)
-    mode: str = Field(default="prediction", max_length=50)
+    method: str = Field(default="pearson", max_length=100)
+    mode: str = Field(default="edge_aggregate", max_length=50)
     num_nodes: int
     mean_corr: float | None = Field(default=None)
     std_corr: float | None = Field(default=None)
     npz_path: str | None = Field(default=None, max_length=500)
     is_active: bool = Field(default=False)
     computed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-    model_version: "ModelVersion" = Relationship(back_populates="correlation_snapshots")
 
 
 # ════════════════════════════════════════════════════════════

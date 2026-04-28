@@ -15,24 +15,21 @@ authors = [
 dependencies = [
     # --- Web Framework ---
     "fastapi[standard]>=0.112.0",       # Framework chính, bao gồm Uvicorn + công cụ chuẩn
-
     # --- Database & ORM ---
     "sqlmodel>=0.0.16",                  # ORM hiện đại = SQLAlchemy + Pydantic
     "psycopg[binary,pool]>=3.2.0",       # Driver PostgreSQL thế hệ 3 (async + pool)
     "alembic>=1.13.0",                   # Quản lý DB migration
     "geoalchemy2>=0.15.0",               # Hỗ trợ kiểu PostGIS (GEOMETRY) trong SQLAlchemy
-
     # --- Auth & Security ---
     "pyjwt>=2.8.0",                      # Tạo & xác thực JWT Token
     "argon2-cffi>=23.1.0",               # Băm mật khẩu chuẩn vàng (thay bcrypt)
-
     # --- Config & Validation ---
     "pydantic-settings>=2.2.0",          # Đọc biến môi trường từ .env có type-check
-
     # --- Utilities ---
     "python-multipart>=0.0.9",           # Xử lý Form Data / Upload file
     "redis>=5.0.0",                      # Redis client (async support)
     "httpx>=0.27.0",                     # HTTP client cho test và internal calls
+    "numpy>=2.4.4",
 ]
 
 # ── Dev dependencies ────────────────────────────────────────────────────────

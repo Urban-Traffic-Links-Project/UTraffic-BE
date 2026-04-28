@@ -10,11 +10,13 @@ Khi thêm module mới (traffic, correlation, prediction):
 from fastapi import APIRouter
 
 from src.modules.auth.router import router as auth_router
+from src.modules.traffic.router import router as traffic_router
+from src.modules.correlation.router import router as correlation_router
 
 api_router = APIRouter(prefix="/api/v1")
 
 # Đăng ký các module router
 api_router.include_router(auth_router)
-# api_router.include_router(traffic_router)
-# api_router.include_router(correlation_router)
+api_router.include_router(traffic_router)
+api_router.include_router(correlation_router)
 # api_router.include_router(prediction_router)
