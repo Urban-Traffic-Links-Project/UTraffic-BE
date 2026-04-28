@@ -28,6 +28,7 @@ def get_nodes(session: DbSession):
             lon=n.lon,
             degree=n.degree,
             betweenness_norm=n.betweenness_norm,
+            street_name=n.street_name,
         )
         for n in nodes
     ]

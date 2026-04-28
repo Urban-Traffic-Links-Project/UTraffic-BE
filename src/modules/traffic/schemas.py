@@ -12,6 +12,7 @@ class NodeResponse(SQLModel):
     lon: float
     degree: float | None = None
     betweenness_norm: float | None = None
+    street_name: str | None = None
 
 
 class EdgeResponse(SQLModel):
