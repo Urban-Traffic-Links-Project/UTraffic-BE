@@ -1,291 +1,521 @@
 """
 scripts/seed_correlation.py
-Tạo mock correlation edge→edge rồi aggregate về node→node.
-Insert vào node_correlations + node_correlation_cache.
+============================
+Nạp ma trận tương quan từ DMFM ML model vào PostgreSQL.
 
-Khi bạn bạn có file edge corr thật:
-  → Thay hàm _build_edge_corr_matrix() để đọc file CSV/NPZ thật
-  → Phần còn lại giữ nguyên
+Pipeline:
+  1. Auto-discover tất cả horizon folders (h1, h3, h6, h9) dưới DATA_ROOT
+  2. Load R_pred_series.npy + segment_ids.npy + R_pred_meta.csv cho mỗi horizon
+  3. Load graph_structure.npz → incident matrix W (1 lần)
+  4. Với mỗi pred_idx:
+       R_t (3696×3696) → bridge → node_corr (1980×1980)
+       → insert correlation_snapshot (mode = "YYYY-MM-DD_Slot_HHMM")
+         + node_correlations rows (top-K per node)
 
-Chạy: uv run python scripts/seed_correlation.py
+DATA_ROOT mặc định: BE/ml_workspace/data/test/
+  └── h1/
+  │   ├── R_pred_series.npy
+  │   ├── segment_ids.npy
+  │   └── R_pred_meta.csv
+  ├── h3/  (nếu có)
+  ├── h6/  (nếu có)
+  └── h9/  (nếu có)
+
+GRAPH_STRUCTURE: ml_workspace/data/graph_structure_*.npz (tự tìm file mới nhất)
+
+Cần chạy seed_graph.py TRƯỚC.
+
+Chạy (đơn giản — không cần tham số):
+  cd BE/
+  uv run python scripts/seed_correlation.py
+
+Hoặc override nguồn dữ liệu:
+  uv run python scripts/seed_correlation.py \\
+    --data-root  "ml_workspace/data/test" \\
+    --graph-structure "ml_workspace/data/graph_structure_20260427_152321.npz" \\
+    --top-k      50
+
+Trong tương lai (AWS S3):
+  uv run python scripts/seed_correlation.py --data-root "s3://bucket/data/test"
 """
-import sys
+
+from src.core.config import get_settings
+import argparse
+import logging
 import math
-import json
 import uuid
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from sqlmodel import Session, select, text
-from src.storage.database import engine
-from src.storage import models  # noqa
-from src.storage.models.graph import Node, Edge
-from src.storage.models.correlation import (
-    CorrelationSnapshot, NodeCorrelation, NodeCorrelationCache
+# ─────────────────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
 )
+log = logging.getLogger(__name__)
 
-NPZ_PATH = Path("ml_workspace/data/graph_structure_20260328_121113.npz")
-SEED = 20260328   # seed cố định → kết quả ổn định mỗi lần chạy
+# Thư mục gốc mặc định (tương đối với thư mục BE/)
+DEFAULT_DATA_ROOT     = Path("ml_workspace/data/test")
+DEFAULT_GRAPH_PATTERN = "ml_workspace/data/graph_structure_*.npz"
+
+# Mapping tên folder → horizon int
+HORIZON_MAP = {"h1": 1, "h3": 3, "h6": 6, "h9": 9}
 
 
-# ════════════════════════════════════════════════════════════
-# BƯỚC 1: Tạo mock edge correlation [429 × 429]
-# Khi có file thật: thay hàm này để đọc CSV/NPZ từ bạn bạn
-# ════════════════════════════════════════════════════════════
-def _build_edge_corr_matrix(n_edges: int) -> np.ndarray:
+# ═════════════════════════════════════════════════════════════════════════════
+# BƯỚC 0: Auto-discover nguồn dữ liệu
+# ═════════════════════════════════════════════════════════════════════════════
+
+def discover_horizon_dirs(data_root: Path) -> list[tuple[int, Path]]:
     """
-    Tạo ma trận edge correlation [E × E] mock.
-    Symmetric, diagonal = 1.0, values trong [-1, 1].
-
-    ĐỂ THAY BẰNG DỮ LIỆU THẬT:
-        import pandas as pd
-        df = pd.read_csv("ml_workspace/data/edge_correlation.csv", index_col=0)
-        return df.values  # shape phải là [429, 429]
+    Quét data_root và trả về danh sách (horizon_int, folder_path) theo thứ tự.
+    Bỏ qua folder nếu thiếu 3 file bắt buộc.
     """
-    rng = np.random.default_rng(SEED)
-    raw = rng.uniform(-1, 1, (n_edges, n_edges))
-    # Làm symmetric
-    mat = (raw + raw.T) / 2
-    np.fill_diagonal(mat, 1.0)
-    # Clip để đảm bảo [-1, 1]
-    return np.clip(mat, -1.0, 1.0)
-
-
-# ════════════════════════════════════════════════════════════
-# BƯỚC 2: Aggregate edge corr → node corr [305 × 305]
-# corr(node_A, node_B) = mean( corr(edge_i, edge_j) )
-#   với edge_i thuộc node_A, edge_j thuộc node_B
-# ════════════════════════════════════════════════════════════
-def _aggregate_to_node_corr(
-    edge_corr: np.ndarray,
-    edge_index: np.ndarray,
-    n_nodes: int,
-) -> np.ndarray:
-    """
-    edge_corr   : [E, E]
-    edge_index  : [2, E] — edge_index[0] = src nodes, edge_index[1] = tgt nodes
-    n_nodes     : 305
-    returns     : [N, N] node correlation matrix
-    """
-    E = edge_corr.shape[0]
-
-    # Map node_idx → list of edge_ids
-    node_to_edges: dict[int, list[int]] = {i: [] for i in range(n_nodes)}
-    for eid in range(E):
-        src = int(edge_index[0, eid])
-        tgt = int(edge_index[1, eid])
-        node_to_edges[src].append(eid)
-        node_to_edges[tgt].append(eid)
-
-    node_corr = np.zeros((n_nodes, n_nodes), dtype=np.float32)
-
-    for i in range(n_nodes):
-        edges_i = node_to_edges[i]
-        if not edges_i:
+    results = []
+    for folder_name, horizon_int in sorted(HORIZON_MAP.items()):
+        folder = data_root / folder_name
+        if not folder.exists():
             continue
-        for j in range(n_nodes):
-            if i == j:
-                node_corr[i, j] = 1.0
-                continue
-            edges_j = node_to_edges[j]
-            if not edges_j:
-                continue
-            # Lấy sub-matrix [edges_i × edges_j] rồi tính mean
-            sub = edge_corr[np.ix_(edges_i, edges_j)]
-            node_corr[i, j] = float(sub.mean())
+        r_pred   = folder / "R_pred_series.npy"
+        seg_ids  = folder / "segment_ids.npy"
+        meta_csv = folder / "R_pred_meta.csv"
+        if not (r_pred.exists() and seg_ids.exists() and meta_csv.exists()):
+            log.warning(f"  ⚠ Bỏ qua {folder}: thiếu file bắt buộc")
+            continue
+        results.append((horizon_int, folder))
+        log.info(f"  ✓ Tìm thấy horizon h{horizon_int}: {folder}")
+    return results
 
+
+def find_graph_structure(pattern: str) -> Path:
+    """Tìm file graph_structure_*.npz mới nhất theo glob pattern."""
+    matches = sorted(Path(".").glob(pattern))
+    if not matches:
+        raise FileNotFoundError(
+            f"Không tìm thấy file graph_structure.npz (pattern: {pattern}). "
+            "Hãy chắc chắn đang chạy từ thư mục BE/."
+        )
+    # Lấy file mới nhất (tên sắp xếp theo timestamp)
+    return matches[-1]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BƯỚC 1: Load dữ liệu cho 1 horizon
+# ═════════════════════════════════════════════════════════════════════════════
+
+def load_horizon_data(folder: Path, graph_structure_path: Path) -> dict:
+    """
+    Load dữ liệu cho 1 horizon folder.
+
+    Trả về dict:
+      R_pred_series : numpy mmap (N, 3696, 3696) float16
+      seg_ids       : (3696,) int64
+      meta_df       : DataFrame — pred_idx → date, slot_label, mode_key
+      gs            : dict — arrays từ graph_structure.npz
+    """
+    log.info(f"📦 Loading R_pred_series.npy (mmap)...")
+    R_pred_series = np.load(folder / "R_pred_series.npy", mmap_mode="r")
+    log.info(f"  ✓ shape={R_pred_series.shape}, dtype={R_pred_series.dtype}")
+
+    log.info(f"📦 Loading segment_ids.npy ...")
+    seg_ids = np.load(folder / "segment_ids.npy")
+    log.info(f"  ✓ shape={seg_ids.shape}")
+
+    log.info(f"📦 Loading R_pred_meta.csv ...")
+    meta_df = pd.read_csv(folder / "R_pred_meta.csv")
+
+    # Chuẩn hóa slot_label (time-of-day)
+    if "time_set_id" in meta_df.columns:
+        meta_df["slot_label"] = meta_df["time_set_id"].astype(str)
+    elif "slot_index" in meta_df.columns:
+        meta_df["slot_label"] = meta_df["slot_index"].apply(lambda x: f"Slot_{x:04d}")
+    else:
+        meta_df["slot_label"] = meta_df["pred_idx"].apply(lambda x: f"Slot_{x:04d}")
+
+    # Chuẩn hóa date (YYYY-MM-DD)
+    if "date" in meta_df.columns:
+        meta_df["date_str"] = pd.to_datetime(meta_df["date"]).dt.strftime("%Y-%m-%d")
+    else:
+        # Fallback: dùng pred_idx nếu không có date
+        meta_df["date_str"] = "unknown"
+
+    # mode_key = "YYYY-MM-DD_Slot_HHMM" — phân biệt cả ngày lẫn giờ
+    meta_df["mode_key"] = meta_df["date_str"] + "_" + meta_df["slot_label"]
+
+    log.info(
+        f"  ✓ {len(meta_df)} rows | "
+        f"dates={sorted(meta_df['date_str'].unique().tolist())} | "
+        f"sample_modes={meta_df['mode_key'].tolist()[:2]} ... {meta_df['mode_key'].tolist()[-1]}"
+    )
+
+    log.info(f"📦 Loading graph_structure.npz ...")
+    gs_raw = np.load(graph_structure_path, allow_pickle=True)
+    gs = {
+        "osm_node_ids":     gs_raw["osm_node_ids"],
+        "coordinates":      gs_raw["coordinates"],
+        "model_node_osm_u": gs_raw["model_node_osm_u_id"],
+        "model_node_osm_v": gs_raw["model_node_osm_v_id"],
+    }
+    log.info(f"  ✓ {len(gs['osm_node_ids'])} intersection nodes")
+
+    return {
+        "R_pred_series": R_pred_series,
+        "seg_ids":       seg_ids,
+        "meta_df":       meta_df,
+        "gs":            gs,
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BƯỚC 2: Build incident matrix W
+# ═════════════════════════════════════════════════════════════════════════════
+
+def build_incident_matrix(gs: dict, seg_ids: np.ndarray) -> tuple:
+    """
+    Xây dựng normalized incident matrix W (n_nodes × n_segs).
+
+    node_corr = W @ R_t @ W.T   (n_nodes × n_nodes)
+    Mean aggregation: node_corr[A,B] = mean của R_t[i,j] với i∈incident(A), j∈incident(B)
+    """
+    log.info("🔄 Building incident matrix W...")
+
+    osm_node_ids = gs["osm_node_ids"]
+    u_ids = gs["model_node_osm_u"]
+    v_ids = gs["model_node_osm_v"]
+    n_nodes = len(osm_node_ids)
+    n_segs  = len(seg_ids)
+
+    osm_to_ni = {int(nid): ni for ni, nid in enumerate(osm_node_ids)}
+
+    incident_pos: defaultdict[int, list[int]] = defaultdict(list)
+    for pos, seg_model_idx in enumerate(seg_ids):
+        seg_model_idx = int(seg_model_idx)
+        u = int(u_ids[seg_model_idx])
+        v = int(v_ids[seg_model_idx])
+        if u in osm_to_ni:
+            incident_pos[osm_to_ni[u]].append(pos)
+        if v in osm_to_ni:
+            incident_pos[osm_to_ni[v]].append(pos)
+
+    W_raw = np.zeros((n_nodes, n_segs), dtype=np.float32)
+    for ni in range(n_nodes):
+        positions = incident_pos.get(ni, [])
+        if positions:
+            W_raw[ni, positions] = 1.0
+
+    inc_count = W_raw.sum(axis=1)
+    W = W_raw / np.maximum(inc_count, 1.0)[:, None]
+
+    isolated = (inc_count == 0).sum()
+    if isolated > 0:
+        log.warning(f"  ⚠ {isolated} nodes không có incident segment nào")
+
+    log.info(
+        f"  ✓ W={n_nodes}×{n_segs} | avg_incident={inc_count[inc_count > 0].mean():.2f} | "
+        f"max={int(inc_count.max())} | covered={int((inc_count > 0).sum())}/{n_nodes}"
+    )
+    return W, inc_count, osm_node_ids
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BƯỚC 3: Bridge R_t → node_corr
+# ═════════════════════════════════════════════════════════════════════════════
+
+def bridge_edge_to_node(R_t: np.ndarray, W: np.ndarray) -> np.ndarray:
+    """node_corr = W @ R_t @ W.T, clip [-1,1], diag=1"""
+    mid = W @ R_t.astype(np.float32)
+    node_corr = mid @ W.T
+    node_corr = np.clip(node_corr, -1.0, 1.0)
+    np.fill_diagonal(node_corr, 1.0)
     return node_corr
 
 
-def haversine_m(lat1, lon1, lat2, lon2) -> float:
-    R = 6371000
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
-    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+# ═════════════════════════════════════════════════════════════════════════════
+# BƯỚC 4: Utilities
+# ═════════════════════════════════════════════════════════════════════════════
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6_371_000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
 
 
-def main():
-    print("=" * 60)
-    print("SEED CORRELATION — mock edge corr → node corr")
-    print("=" * 60)
+def fetch_db_lookups(session: Session) -> tuple:
+    node_rows = session.execute(
+        text("SELECT id, osm_node_id FROM nodes")
+    ).fetchall()
+    osm_to_uuid = {int(r[1]): uuid.UUID(str(r[0])) for r in node_rows}
 
-    if not NPZ_PATH.exists():
-        print(f"❌ File không tồn tại: {NPZ_PATH}")
-        sys.exit(1)
+    if not osm_to_uuid:
+        raise RuntimeError("Bảng nodes rỗng — hãy chạy seed_graph.py trước!")
 
-    # ── Load NPZ ──────────────────────────────────────────────
-    print(f"\n📂 Đọc {NPZ_PATH}...")
-    gs      = np.load(str(NPZ_PATH), allow_pickle=True)
-    edge_index   = gs['edge_index']    # [2, 429]
-    coordinates  = gs['coordinates']   # [305, 2]
-    osm_node_ids = gs['osm_node_ids']  # [305]
-    N, E = len(osm_node_ids), edge_index.shape[1]
-    print(f"   {N} nodes, {E} edges")
+    uuid_to_osm = {v: k for k, v in osm_to_uuid.items()}
+    edge_rows = session.execute(
+        text("SELECT source_node_id, target_node_id FROM edges")
+    ).fetchall()
+    adj_set: set[tuple[int, int]] = set()
+    for src_uid, tgt_uid in edge_rows:
+        s = uuid_to_osm.get(uuid.UUID(str(src_uid)))
+        t = uuid_to_osm.get(uuid.UUID(str(tgt_uid)))
+        if s and t:
+            adj_set.add((s, t))
+            adj_set.add((t, s))
 
-    # ── Bước 1: Edge corr matrix ──────────────────────────────
-    print(f"\n⚙️  Bước 1: Tạo mock edge corr [{E}×{E}]...")
-    edge_corr = _build_edge_corr_matrix(E)
-    print(f"   Xong. min={edge_corr.min():.3f}, max={edge_corr.max():.3f}")
+    log.info(f"  ✓ {len(osm_to_uuid)} nodes, {len(adj_set)//2} edges loaded from DB")
+    return osm_to_uuid, adj_set
 
-    # ── Bước 2: Aggregate → node corr ────────────────────────
-    print(f"\n⚙️  Bước 2: Aggregate → node corr [{N}×{N}]...")
-    node_corr = _aggregate_to_node_corr(edge_corr, edge_index, N)
-    print(f"   Xong. min={node_corr.min():.3f}, max={node_corr.max():.3f}")
 
-    # ── Bước 3: Load nodes từ DB ──────────────────────────────
-    print(f"\n📋 Bước 3: Load nodes từ DB...")
-    with Session(engine) as session:
-        db_nodes = session.exec(
-            select(Node).order_by(Node.node_index)
-        ).all()
+# ═════════════════════════════════════════════════════════════════════════════
+# BƯỚC 5: Insert 1 snapshot
+# ═════════════════════════════════════════════════════════════════════════════
 
-        if len(db_nodes) != N:
-            print(f"❌ DB có {len(db_nodes)} nodes, NPZ có {N} nodes")
-            print("   Chạy seed_graph.py trước!")
-            sys.exit(1)
+def insert_one_snapshot(
+    session:      Session,
+    mode_key:     str,          # "2024-08-27_Slot_0900"
+    horizon:      int,
+    node_corr:    np.ndarray,
+    osm_node_ids: np.ndarray,
+    osm_to_uuid:  dict[int, uuid.UUID],
+    adj_set:      set[tuple[int, int]],
+    top_k:        int,
+    is_active:    bool,
+) -> uuid.UUID:
+    """Insert 1 correlation_snapshot + node_correlations rows."""
+    n_nodes = len(osm_node_ids)
+    now = datetime.now(timezone.utc)
+    snapshot_id = uuid.uuid4()
 
-        # Map node_index → Node object
-        idx_to_node = {n.node_index: n for n in db_nodes}
-        print(f"   ✅ {len(db_nodes)} nodes loaded")
+    upper_tri = node_corr[np.triu_indices(n_nodes, k=1)]
+    mean_corr = float(np.mean(upper_tri))
+    std_corr  = float(np.std(upper_tri))
 
-        # ── Xóa correlation cũ ────────────────────────────────
-        print("\n🗑️  Xóa correlation cũ...")
-        session.exec(text("DELETE FROM node_correlation_cache"))
-        session.exec(text("DELETE FROM node_correlations"))
-        session.exec(text("DELETE FROM correlation_snapshots"))
-        session.commit()
+    session.execute(
+        text("""
+            INSERT INTO correlation_snapshots
+              (id, method, mode, num_nodes, mean_corr, std_corr, is_active, computed_at)
+            VALUES
+              (:id, :method, :mode, :num_nodes, :mean_corr, :std_corr, :is_active, :computed_at)
+        """),
+        {
+            "id":          str(snapshot_id),
+            "method":      f"dmfm_bridge_h{horizon}",
+            "mode":        mode_key,    # "2024-08-27_Slot_0900"
+            "num_nodes":   n_nodes,
+            "mean_corr":   mean_corr,
+            "std_corr":    std_corr,
+            "is_active":   is_active,
+            "computed_at": now,
+        },
+    )
 
-        # ── Tạo CorrelationSnapshot ───────────────────────────
-        print("\n📸 Tạo CorrelationSnapshot...")
-        snapshot = CorrelationSnapshot(
-            id=uuid.uuid4(),
-            # model_version_id bỏ qua vì không dùng ML
-            method="mock_edge_aggregate",
-            mode="mock",
-            num_nodes=N,
-            mean_corr=float(node_corr[~np.eye(N, dtype=bool)].mean()),
-            std_corr=float(node_corr[~np.eye(N, dtype=bool)].std()),
-            is_active=True,
-            computed_at=datetime.utcnow(),
+    # Build node_correlations rows
+    corr_batch: list[dict] = []
+
+    for ni in range(n_nodes):
+        osm_id_a = int(osm_node_ids[ni])
+        node_uuid_a = osm_to_uuid.get(osm_id_a)
+        if node_uuid_a is None:
+            continue
+
+        corr_row = node_corr[ni].copy()
+        corr_row[ni] = -2.0
+
+        top_indices = np.argsort(-np.abs(corr_row))[:top_k]
+
+        for rank, nj in enumerate(top_indices):
+            if corr_row[nj] <= -2.0:
+                continue
+            osm_id_b = int(osm_node_ids[nj])
+            node_uuid_b = osm_to_uuid.get(osm_id_b)
+            if node_uuid_b is None:
+                continue
+
+            corr_batch.append({
+                "id":                str(uuid.uuid4()),
+                "snapshot_id":       str(snapshot_id),
+                "node_a_id":         str(node_uuid_a),
+                "node_b_id":         str(node_uuid_b),
+                "correlation_value": round(float(corr_row[nj]), 6),
+                "rank_from_a":       rank + 1,
+                "is_adjacent":       (osm_id_a, osm_id_b) in adj_set,
+                "created_at":        now,
+            })
+
+    BATCH = 5000
+    for i in range(0, len(corr_batch), BATCH):
+        session.execute(
+            text("""
+                INSERT INTO node_correlations
+                  (id, snapshot_id, node_a_id, node_b_id,
+                   correlation_value, rank_from_a, is_adjacent, created_at)
+                VALUES
+                  (:id, :snapshot_id, :node_a_id, :node_b_id,
+                   :correlation_value, :rank_from_a, :is_adjacent, :created_at)
+            """),
+            corr_batch[i: i + BATCH],
         )
-        session.add(snapshot)
-        session.flush()
-        snapshot_id = snapshot.id
-        print(f"   snapshot_id = {snapshot_id}")
 
-        # ── Insert NodeCorrelation (tất cả cặp i≠j) ──────────
-        print(f"\n📊 Bước 4: Insert NodeCorrelation ({N*(N-1)} rows)...")
+    session.flush()
+    return snapshot_id
 
-        # Build neighbor set từ edge_index (adjacent nodes)
-        adjacent: dict[int, set[int]] = {i: set() for i in range(N)}
-        for eid in range(E):
-            s, t = int(edge_index[0, eid]), int(edge_index[1, eid])
-            adjacent[s].add(t)
-            adjacent[t].add(s)
 
-        BATCH = 5000
-        batch = []
-        total = 0
+# ═════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ═════════════════════════════════════════════════════════════════════════════
 
-        for i in range(N):
-            node_a = idx_to_node[i]
-            # Tính rank từ góc nhìn của node_i: sort các j theo |corr| giảm dần
-            corr_row = node_corr[i]  # [N]
-            sorted_j = np.argsort(-np.abs(corr_row)).tolist()  # index j sorted
-            rank_map = {j: rank for rank, j in enumerate(sorted_j) if j != i}
+def main(args: argparse.Namespace) -> None:
+    import time
 
-            for j in range(N):
-                if i == j:
+    log.info("=" * 70)
+    log.info("🚀 seed_correlation.py — DMFM Multi-Horizon Seeder")
+    log.info("=" * 70)
+
+    data_root = Path(args.data_root)
+    if not data_root.exists():
+        raise FileNotFoundError(f"DATA_ROOT không tồn tại: {data_root.resolve()}")
+
+    # Tìm file graph_structure mới nhất
+    graph_structure_path = Path(args.graph_structure) if args.graph_structure else find_graph_structure(DEFAULT_GRAPH_PATTERN)
+    log.info(f"📐 Graph structure: {graph_structure_path}")
+
+    # Auto-discover horizon folders
+    log.info(f"🔍 Scanning DATA_ROOT: {data_root.resolve()}")
+    horizon_dirs = discover_horizon_dirs(data_root)
+    if not horizon_dirs:
+        raise RuntimeError(f"Không tìm thấy horizon folder nào trong {data_root}. "
+                           "Cần ít nhất 1 trong: h1, h3, h6, h9")
+
+    log.info(f"📊 Sẽ xử lý {len(horizon_dirs)} horizon(s): "
+             f"{[f'h{h}' for h, _ in horizon_dirs]}")
+
+    # Connect DB
+    log.info("🔌 Connecting DB...")
+    engine = create_engine(args.db_url, echo=False)
+
+    with Session(engine) as session:
+        # ── Dọn sạch toàn bộ dữ liệu cũ ─────────────────────────────────────
+        log.info("🧹 Xóa dữ liệu correlation cũ...")
+        deleted_nc = session.execute(text("DELETE FROM node_correlations")).rowcount
+        deleted_cs = session.execute(text("DELETE FROM correlation_snapshots")).rowcount
+        session.commit()
+        log.info(f"  ✓ Đã xóa {deleted_cs} snapshots, {deleted_nc:,} node_correlations rows")
+
+        # Load DB lookups (dùng chung cho tất cả horizons)
+        osm_to_uuid, adj_set = fetch_db_lookups(session)
+
+        total_snapshots  = 0
+        total_corr_rows  = 0
+        grand_t0 = time.time()
+        first_snapshot   = True   # snapshot đầu tiên trên tất cả horizons → is_active
+
+        for horizon_int, folder in horizon_dirs:
+            log.info("")
+            log.info(f"{'─'*70}")
+            log.info(f"📂 Horizon h{horizon_int} — {folder}")
+            log.info(f"{'─'*70}")
+
+            data = load_horizon_data(folder, graph_structure_path)
+            R_pred_series = data["R_pred_series"]
+            seg_ids       = data["seg_ids"]
+            meta_df       = data["meta_df"]
+            gs            = data["gs"]
+
+            n_snapshots = R_pred_series.shape[0]
+
+            # Build incident matrix (1 lần per horizon, seg_ids có thể khác)
+            W, _, osm_node_ids = build_incident_matrix(gs, seg_ids)
+
+            horizon_t0 = time.time()
+
+            for pred_idx in range(n_snapshots):
+                row = meta_df[meta_df["pred_idx"] == pred_idx]
+                if row.empty:
+                    log.warning(f"  ⚠ pred_idx={pred_idx} không có trong meta_csv, bỏ qua")
                     continue
-                corr_val = float(node_corr[i, j])
-                node_b = idx_to_node[j]
-                is_adj = j in adjacent[i]
 
-                batch.append(NodeCorrelation(
-                    id=uuid.uuid4(),
-                    snapshot_id=snapshot_id,
-                    node_a_id=node_a.id,
-                    node_b_id=node_b.id,
-                    correlation_value=round(corr_val, 6),
-                    rank_from_a=rank_map.get(j),
-                    is_adjacent=is_adj,
-                    created_at=datetime.utcnow(),
-                ))
+                mode_key   = str(row.iloc[0]["mode_key"])    # "2024-08-27_Slot_0900"
+                is_active  = first_snapshot
+                first_snapshot = False
 
-                if len(batch) >= BATCH:
-                    session.add_all(batch)
-                    session.flush()
-                    total += len(batch)
-                    batch = []
-                    print(f"   ... {total:,} rows inserted")
+                t0 = time.time()
+                log.info(f"  [{pred_idx+1:03d}/{n_snapshots}] h{horizon_int} | {mode_key} ...")
 
-        if batch:
-            session.add_all(batch)
-            session.flush()
-            total += len(batch)
+                R_t = np.array(R_pred_series[pred_idx], dtype=np.float32)
+                node_corr = bridge_edge_to_node(R_t, W)
 
-        session.commit()
-        print(f"   ✅ Total: {total:,} NodeCorrelation rows")
+                snap_id = insert_one_snapshot(
+                    session      = session,
+                    mode_key     = mode_key,
+                    horizon      = horizon_int,
+                    node_corr    = node_corr,
+                    osm_node_ids = osm_node_ids,
+                    osm_to_uuid  = osm_to_uuid,
+                    adj_set      = adj_set,
+                    top_k        = args.top_k,
+                    is_active    = is_active,
+                )
 
-        # ── Build NodeCorrelationCache (JSONB per node) ───────
-        print(f"\n💾 Bước 5: Build NodeCorrelationCache (1 row per node)...")
+                session.commit()
+                total_snapshots += 1
+                total_corr_rows += args.top_k * len(osm_to_uuid)
 
-        cache_batch = []
-        for i in range(N):
-            node_a = idx_to_node[i]
-            lat_a, lon_a = float(coordinates[i, 0]), float(coordinates[i, 1])
+                corr_vals = node_corr[node_corr < 1.0]
+                log.info(
+                    f"    ✓ {str(snap_id)[:8]}... | "
+                    f"mean={corr_vals.mean():.4f} | "
+                    f"{time.time()-t0:.1f}s"
+                    + (" 🌟 (active)" if is_active else "")
+                )
 
-            # Tất cả 304 neighbors, sorted by |corr| desc
-            corr_row = node_corr[i]
-            sorted_j = sorted(
-                [j for j in range(N) if j != i],
-                key=lambda j: abs(corr_row[j]),
-                reverse=True
-            )
+            log.info(f"  ⏱ h{horizon_int} hoàn tất trong {time.time()-horizon_t0:.0f}s")
 
-            neighbors_json = []
-            for rank, j in enumerate(sorted_j):
-                node_b = idx_to_node[j]
-                lat_b = float(coordinates[j, 0])
-                lon_b = float(coordinates[j, 1])
-                dist_m = haversine_m(lat_a, lon_a, lat_b, lon_b)
-                is_adj = j in adjacent[i]
-
-                neighbors_json.append({
-                    "node_index": j,
-                    "osm_node_id": int(osm_node_ids[j]),
-                    "node_id": str(node_b.id),
-                    "lat": round(lat_b, 7),
-                    "lon": round(lon_b, 7),
-                    "corr": round(float(corr_row[j]), 6),
-                    "rank": rank,
-                    "dist_m": round(dist_m, 1),
-                    "is_adjacent": is_adj,
-                })
-
-            cache_batch.append(NodeCorrelationCache(
-                node_id=node_a.id,
-                snapshot_id=snapshot_id,
-                neighbors_json=neighbors_json,
-                updated_at=datetime.utcnow(),
-            ))
-
-        session.add_all(cache_batch)
-        session.commit()
-        print(f"   ✅ {len(cache_batch)} cache rows inserted")
-
-    print("\n" + "=" * 60)
-    print("✅ SEED CORRELATION HOÀN THÀNH")
-    print(f"   {N*(N-1):,} correlation pairs trong DB")
-    print(f"   {N} JSONB cache rows sẵn sàng cho API")
-    print("=" * 60)
+        grand_total = time.time() - grand_t0
+        log.info("")
+        log.info("=" * 70)
+        log.info("✅ Hoàn tất!")
+        log.info(f"   ✔ {total_snapshots} snapshots → correlation_snapshots")
+        log.info(f"   ✔ ~{total_corr_rows:,} rows → node_correlations")
+        log.info(f"   ⏱ Tổng: {grand_total:.0f}s = {grand_total/60:.1f} phút")
+        log.info(f"   📐 Data root: {data_root.resolve()}")
+        log.info(f"   🌟 Active snapshot: pred_idx=0 của h{horizon_dirs[0][0]}")
+        log.info("=" * 70)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Seed DMFM correlation từ ml_workspace/data/test vào PostgreSQL"
+    )
+    parser.add_argument(
+        "--data-root",
+        default=str(DEFAULT_DATA_ROOT),
+        help=(
+            f"Thư mục gốc chứa h1/, h3/, h6/, h9/ (default: {DEFAULT_DATA_ROOT}). "
+            "Trong tương lai có thể là s3://bucket/data/test"
+        ),
+    )
+    parser.add_argument(
+        "--graph-structure",
+        default=None,
+        help="Path tới graph_structure_*.npz (default: tự tìm file mới nhất trong ml_workspace/data/)",
+    )
+    parser.add_argument(
+        "--db-url",
+        default=get_settings().database_url,
+        help="SQLAlchemy DB URL",
+    )
+    parser.add_argument(
+        "--top-k", type=int, default=50,
+        help="Số neighbors lưu per node per snapshot (default: 50)",
+    )
+    args = parser.parse_args()
+    main(args)

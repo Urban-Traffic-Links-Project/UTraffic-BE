@@ -8,10 +8,8 @@ def get_all_nodes(session: Session) -> list[Node]:
 
 
 def get_all_edges(session: Session) -> list[dict]:
-    """Trả về edges kèm tọa độ source/target để vẽ Polyline."""
     edges = session.exec(select(Edge)).all()
     nodes = {n.id: n for n in session.exec(select(Node)).all()}
-
     result = []
     for e in edges:
         src = nodes.get(e.source_node_id)

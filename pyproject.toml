@@ -29,6 +29,9 @@ dependencies = [
     "python-multipart>=0.0.9",           # Xử lý Form Data / Upload file
     "redis>=5.0.0",                      # Redis client (async support)
     "httpx>=0.27.0",                     # HTTP client cho test và internal calls
+    "pandas",
+    "networkx>=3.6.1",
+    "scikit-learn>=1.8.0",
     "numpy>=2.4.4",
 ]
 

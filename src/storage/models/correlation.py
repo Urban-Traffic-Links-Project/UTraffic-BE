@@ -95,7 +95,7 @@ class NodeCorrelationCache(SQLModel, table=True):
     __tablename__ = "node_correlation_cache"
 
     node_id: uuid.UUID = Field(foreign_key="nodes.id", primary_key=True)
-    snapshot_id: uuid.UUID = Field(foreign_key="correlation_snapshots.id")
+    snapshot_id: uuid.UUID = Field(foreign_key="correlation_snapshots.id", primary_key=True)
 
     # JSONB: cần dùng sa_column để SQLAlchemy hiểu kiểu PostgreSQL đặc biệt này
     neighbors_json: Any = Field(
