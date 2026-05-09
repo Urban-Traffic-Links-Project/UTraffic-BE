@@ -15,7 +15,7 @@ ENV_FILE = BASE_URL / ".env"
 
 class Settings(BaseSettings):
     # ── App ─────────────────────────────────────────────────
-    app_name: str = "Utraffic API"
+    app_name: str = "UTraffic API"
     app_env: str = "development"
     debug: bool = True
 
@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     redis_db_pred: int = 2
     redis_db_api: int = 3
 
+    # ── AWS S3 ───────────────────────────────────────────
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
+    aws_region: str = "ap-southeast-1"
+    s3_bucket_name: str = "utraffic-data-bk-team"
+
     # ── JWT ──────────────────────────────────────────────────
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
@@ -42,8 +48,6 @@ class Settings(BaseSettings):
 
     # ── ML Engine ───────────────────────────────────────────
     ml_workspace_path: str = "./ml_workspace"
-    model_checkpoint_path: str = "./ml_workspace/checkpoints/best_model.pth"
-    npz_features_path: str = "./ml_workspace/data/processed_features.npz"
 
     # ── PostgreSQL ───────────────────────────────────────────
     model_config = SettingsConfigDict(
@@ -53,8 +57,6 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-
-# print(f"[CONFIG] chạy thành công {BASE_URL}")
 @lru_cache
 def get_settings() -> Settings:
     return Settings()

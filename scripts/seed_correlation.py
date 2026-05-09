@@ -12,7 +12,7 @@ Pipeline:
        → insert correlation_snapshot (mode = "YYYY-MM-DD_Slot_HHMM")
          + node_correlations rows (top-K per node)
 
-DATA_ROOT mặc định: BE/ml_workspace/data/test/
+DATA_ROOT mặc định: BE/ml_workspace/data/dmfm_predictions/test/
   └── h1/
   │   ├── R_pred_series.npy
   │   ├── segment_ids.npy
@@ -31,17 +31,19 @@ Chạy (đơn giản — không cần tham số):
 
 Hoặc override nguồn dữ liệu:
   uv run python scripts/seed_correlation.py \\
-    --data-root  "ml_workspace/data/test" \\
+    --data-root  "ml_workspace/data/dmfm_predictions/test" \\
     --graph-structure "ml_workspace/data/graph_structure_20260427_152321.npz" \\
     --top-k      50
 
 Trong tương lai (AWS S3):
-  uv run python scripts/seed_correlation.py --data-root "s3://bucket/data/test"
+  uv run python scripts/seed_correlation.py --data-root "s3://bucket/data/dmfm_predictions/test"
 """
 
 from src.core.config import get_settings
 import argparse
+import io
 import logging
+import tempfile
 import math
 import uuid
 from collections import defaultdict
@@ -61,75 +63,190 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Thư mục gốc mặc định (tương đối với thư mục BE/)
-DEFAULT_DATA_ROOT     = Path("ml_workspace/data/test")
-DEFAULT_GRAPH_PATTERN = "ml_workspace/data/graph_structure_*.npz"
+# ── Cấu hình đường dẫn ────────────────────────────────────────
+# S3 keys
+S3_DATA_ROOT      = "ml-data/dmfm_predictions/test"
+S3_GRAPH_PATTERN  = "ml-data/graph_structure_*.npz"
+
+# Local fallback (tương đối với thư mục BE/)
+LOCAL_DATA_ROOT     = Path("ml_workspace/data/dmfm_predictions/test")
+LOCAL_GRAPH_PATTERN = "ml_workspace/data/graph_structure_*.npz"
 
 # Mapping tên folder → horizon int
 HORIZON_MAP = {"h1": 1, "h3": 3, "h6": 6, "h9": 9}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# HELPERS: Load S3 vs Local
+# ═════════════════════════════════════════════════════════════════════════════
+
+def get_s3_cache_path(s3_key: str) -> Path:
+    tmp_dir = Path(tempfile.gettempdir()) / "dmfm_s3_cache"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    return tmp_dir / s3_key.replace("/", "_")
+
+def load_s3_or_local_npz(s3_key: str, local_path: Path):
+    settings = get_settings()
+    if s3_key and settings.aws_access_key_id:
+        try:
+            from src.storage.aws.s3_client import get_s3_client
+            log.info(f"📥 Download từ S3: {s3_key}")
+            raw = get_s3_client().download_bytes(s3_key)
+            return np.load(io.BytesIO(raw), allow_pickle=True)
+        except Exception as e:
+            log.warning(f"S3 failed ({e}), fallback về local")
+
+    if not local_path.exists():
+        raise FileNotFoundError(f"❌ Không tìm thấy: S3={s3_key}, Local={local_path}")
+    log.info(f"📂 Load local: {local_path}")
+    return np.load(str(local_path), allow_pickle=True)
+
+def load_s3_or_local_npy_mmap(s3_key: str, local_path: Path):
+    settings = get_settings()
+    if s3_key and settings.aws_access_key_id:
+        try:
+            from src.storage.aws.s3_client import get_s3_client
+            s3 = get_s3_client()
+            tmp_path = get_s3_cache_path(s3_key)
+            if not tmp_path.exists():
+                log.info(f"📥 Download từ S3 → disk cache: {s3_key}")
+                s3.download_to_file(s3_key, tmp_path)
+            else:
+                log.info(f"📂 Dùng cache S3: {tmp_path}")
+            return np.load(tmp_path, mmap_mode="r")
+        except Exception as e:
+            log.warning(f"S3 failed ({e}), fallback về local")
+
+    if not local_path.exists():
+        raise FileNotFoundError(f"❌ Không tìm thấy: S3={s3_key}, Local={local_path}")
+    log.info(f"📂 Load local (mmap): {local_path}")
+    return np.load(str(local_path), mmap_mode="r")
+
+def load_s3_or_local_npy(s3_key: str, local_path: Path):
+    settings = get_settings()
+    if s3_key and settings.aws_access_key_id:
+        try:
+            from src.storage.aws.s3_client import get_s3_client
+            log.info(f"📥 Download từ S3: {s3_key}")
+            raw = get_s3_client().download_bytes(s3_key)
+            return np.load(io.BytesIO(raw))
+        except Exception as e:
+            log.warning(f"S3 failed ({e}), fallback về local")
+
+    if not local_path.exists():
+        raise FileNotFoundError(f"❌ Không tìm thấy: S3={s3_key}, Local={local_path}")
+    log.info(f"📂 Load local: {local_path}")
+    return np.load(str(local_path))
+
+def load_s3_or_local_csv(s3_key: str, local_path: Path):
+    settings = get_settings()
+    if s3_key and settings.aws_access_key_id:
+        try:
+            from src.storage.aws.s3_client import get_s3_client
+            log.info(f"📥 Download từ S3: {s3_key}")
+            text = get_s3_client().download_text(s3_key)
+            return pd.read_csv(io.StringIO(text))
+        except Exception as e:
+            log.warning(f"S3 failed ({e}), fallback về local")
+
+    if not local_path.exists():
+        raise FileNotFoundError(f"❌ Không tìm thấy: S3={s3_key}, Local={local_path}")
+    log.info(f"📂 Load local: {local_path}")
+    return pd.read_csv(local_path)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # BƯỚC 0: Auto-discover nguồn dữ liệu
 # ═════════════════════════════════════════════════════════════════════════════
 
-def discover_horizon_dirs(data_root: Path) -> list[tuple[int, Path]]:
+def discover_horizon_dirs(s3_root: str, local_root: Path) -> list[tuple[int, str, Path]]:
     """
-    Quét data_root và trả về danh sách (horizon_int, folder_path) theo thứ tự.
-    Bỏ qua folder nếu thiếu 3 file bắt buộc.
+    Quét và trả về danh sách (horizon_int, s3_folder_key, local_folder_path).
     """
     results = []
+    settings = get_settings()
+
+    if settings.aws_access_key_id:
+        try:
+            from src.storage.aws.s3_client import get_s3_client
+            s3 = get_s3_client()
+            base_key = s3_root if s3_root.endswith("/") else f"{s3_root}/"
+            
+            s3_found = False
+            for folder_name, horizon_int in sorted(HORIZON_MAP.items()):
+                folder_key = f"{base_key}{folder_name}/"
+                r_pred   = f"{folder_key}R_pred_series.npy"
+                seg_ids  = f"{folder_key}segment_ids.npy"
+                meta_csv = f"{folder_key}R_pred_meta.csv"
+                
+                if s3.key_exists(r_pred) and s3.key_exists(seg_ids) and s3.key_exists(meta_csv):
+                    results.append((horizon_int, folder_key, local_root / folder_name))
+                    log.info(f"  ✓ Tìm thấy horizon h{horizon_int} trên S3: {folder_key}")
+                    s3_found = True
+                else:
+                    log.warning(f"  ⚠ Bỏ qua S3 {folder_key}: thiếu file bắt buộc")
+            if s3_found:
+                return results
+            else:
+                log.warning("Không tìm thấy dữ liệu trên S3 hợp lệ, fallback về local...")
+        except Exception as e:
+            log.warning(f"S3 failed ({e}), fallback về local...")
+
     for folder_name, horizon_int in sorted(HORIZON_MAP.items()):
-        folder = data_root / folder_name
+        folder = local_root / folder_name
         if not folder.exists():
             continue
         r_pred   = folder / "R_pred_series.npy"
         seg_ids  = folder / "segment_ids.npy"
         meta_csv = folder / "R_pred_meta.csv"
         if not (r_pred.exists() and seg_ids.exists() and meta_csv.exists()):
-            log.warning(f"  ⚠ Bỏ qua {folder}: thiếu file bắt buộc")
+            log.warning(f"  ⚠ Bỏ qua local {folder}: thiếu file bắt buộc")
             continue
-        results.append((horizon_int, folder))
-        log.info(f"  ✓ Tìm thấy horizon h{horizon_int}: {folder}")
+        results.append((horizon_int, f"{s3_root}/{folder_name}/", folder))
+        log.info(f"  ✓ Tìm thấy horizon h{horizon_int} ở local: {folder}")
+        
     return results
 
 
-def find_graph_structure(pattern: str) -> Path:
-    """Tìm file graph_structure_*.npz mới nhất theo glob pattern."""
-    matches = sorted(Path(".").glob(pattern))
+def find_graph_structure(s3_pattern: str, local_pattern: str) -> tuple[str, Path]:
+    settings = get_settings()
+    if settings.aws_access_key_id:
+        try:
+            from src.storage.aws.s3_client import get_s3_client
+            s3 = get_s3_client()
+            prefix = s3_pattern.split("*")[0]
+            latest_key = s3.get_latest_key(prefix, ".npz")
+            if latest_key:
+                log.info(f"  ✓ Tìm thấy graph_structure trên S3: {latest_key}")
+                local_fallback = Path(local_pattern.replace("*", "latest"))
+                return latest_key, local_fallback
+            log.warning(f"Không tìm thấy S3 key cho prefix {prefix}, fallback về local...")
+        except Exception as e:
+            log.warning(f"S3 failed ({e}), fallback về local...")
+
+    matches = sorted(Path(".").glob(local_pattern))
     if not matches:
         raise FileNotFoundError(
-            f"Không tìm thấy file graph_structure.npz (pattern: {pattern}). "
-            "Hãy chắc chắn đang chạy từ thư mục BE/."
+            f"Không tìm thấy graph_structure.npz (S3: {s3_pattern}, Local: {local_pattern})"
         )
-    # Lấy file mới nhất (tên sắp xếp theo timestamp)
-    return matches[-1]
+    return "", matches[-1]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # BƯỚC 1: Load dữ liệu cho 1 horizon
 # ═════════════════════════════════════════════════════════════════════════════
 
-def load_horizon_data(folder: Path, graph_structure_path: Path) -> dict:
-    """
-    Load dữ liệu cho 1 horizon folder.
-
-    Trả về dict:
-      R_pred_series : numpy mmap (N, 3696, 3696) float16
-      seg_ids       : (3696,) int64
-      meta_df       : DataFrame — pred_idx → date, slot_label, mode_key
-      gs            : dict — arrays từ graph_structure.npz
-    """
-    log.info(f"📦 Loading R_pred_series.npy (mmap)...")
-    R_pred_series = np.load(folder / "R_pred_series.npy", mmap_mode="r")
+def load_horizon_data(folder_key: str, folder_path: Path, gs_s3_key: str, gs_local_path: Path) -> dict:
+    log.info(f"📦 Loading R_pred_series.npy ...")
+    R_pred_series = load_s3_or_local_npy_mmap(f"{folder_key}R_pred_series.npy", folder_path / "R_pred_series.npy")
     log.info(f"  ✓ shape={R_pred_series.shape}, dtype={R_pred_series.dtype}")
 
     log.info(f"📦 Loading segment_ids.npy ...")
-    seg_ids = np.load(folder / "segment_ids.npy")
+    seg_ids = load_s3_or_local_npy(f"{folder_key}segment_ids.npy", folder_path / "segment_ids.npy")
     log.info(f"  ✓ shape={seg_ids.shape}")
 
     log.info(f"📦 Loading R_pred_meta.csv ...")
-    meta_df = pd.read_csv(folder / "R_pred_meta.csv")
+    meta_df = load_s3_or_local_csv(f"{folder_key}R_pred_meta.csv", folder_path / "R_pred_meta.csv")
 
     # Chuẩn hóa slot_label (time-of-day)
     if "time_set_id" in meta_df.columns:
@@ -156,7 +273,7 @@ def load_horizon_data(folder: Path, graph_structure_path: Path) -> dict:
     )
 
     log.info(f"📦 Loading graph_structure.npz ...")
-    gs_raw = np.load(graph_structure_path, allow_pickle=True)
+    gs_raw = load_s3_or_local_npz(gs_s3_key, gs_local_path)
     gs = {
         "osm_node_ids":     gs_raw["osm_node_ids"],
         "coordinates":      gs_raw["coordinates"],
@@ -380,23 +497,42 @@ def main(args: argparse.Namespace) -> None:
     log.info("🚀 seed_correlation.py — DMFM Multi-Horizon Seeder")
     log.info("=" * 70)
 
-    data_root = Path(args.data_root)
-    if not data_root.exists():
-        raise FileNotFoundError(f"DATA_ROOT không tồn tại: {data_root.resolve()}")
+    if args.data_root:
+        data_root_str = str(args.data_root)
+        if data_root_str.startswith("s3://"):
+            s3_data_root = data_root_str.replace("s3://", "")
+            local_data_root = Path("invalid_fallback")
+        else:
+            s3_data_root = "invalid_fallback"
+            local_data_root = Path(data_root_str)
+    else:
+        s3_data_root = S3_DATA_ROOT
+        local_data_root = LOCAL_DATA_ROOT
+
+    if args.graph_structure:
+        gs_str = str(args.graph_structure)
+        if gs_str.startswith("s3://"):
+            s3_gs_pattern = gs_str.replace("s3://", "")
+            local_gs_pattern = "invalid_fallback"
+        else:
+            s3_gs_pattern = "invalid_fallback"
+            local_gs_pattern = gs_str
+    else:
+        s3_gs_pattern = S3_GRAPH_PATTERN
+        local_gs_pattern = str(LOCAL_GRAPH_PATTERN)
 
     # Tìm file graph_structure mới nhất
-    graph_structure_path = Path(args.graph_structure) if args.graph_structure else find_graph_structure(DEFAULT_GRAPH_PATTERN)
-    log.info(f"📐 Graph structure: {graph_structure_path}")
+    gs_s3_key, gs_local_path = find_graph_structure(s3_gs_pattern, local_gs_pattern)
+    log.info(f"📐 Graph structure: S3={gs_s3_key} | Local={gs_local_path}")
 
     # Auto-discover horizon folders
-    log.info(f"🔍 Scanning DATA_ROOT: {data_root.resolve()}")
-    horizon_dirs = discover_horizon_dirs(data_root)
+    log.info(f"🔍 Scanning DATA_ROOT: S3={s3_data_root} | Local={local_data_root}")
+    horizon_dirs = discover_horizon_dirs(s3_data_root, local_data_root)
     if not horizon_dirs:
-        raise RuntimeError(f"Không tìm thấy horizon folder nào trong {data_root}. "
-                           "Cần ít nhất 1 trong: h1, h3, h6, h9")
+        raise RuntimeError(f"Không tìm thấy horizon folder nào. Cần ít nhất 1 trong: h1, h3, h6, h9")
 
     log.info(f"📊 Sẽ xử lý {len(horizon_dirs)} horizon(s): "
-             f"{[f'h{h}' for h, _ in horizon_dirs]}")
+             f"{[f'h{h}' for h, _, _ in horizon_dirs]}")
 
     # Connect DB
     log.info("🔌 Connecting DB...")
@@ -418,13 +554,13 @@ def main(args: argparse.Namespace) -> None:
         grand_t0 = time.time()
         first_snapshot   = True   # snapshot đầu tiên trên tất cả horizons → is_active
 
-        for horizon_int, folder in horizon_dirs:
+        for horizon_int, folder_key, folder_path in horizon_dirs:
             log.info("")
             log.info(f"{'─'*70}")
-            log.info(f"📂 Horizon h{horizon_int} — {folder}")
+            log.info(f"📂 Horizon h{horizon_int} — S3:{folder_key} | Local:{folder_path}")
             log.info(f"{'─'*70}")
 
-            data = load_horizon_data(folder, graph_structure_path)
+            data = load_horizon_data(folder_key, folder_path, gs_s3_key, gs_local_path)
             R_pred_series = data["R_pred_series"]
             seg_ids       = data["seg_ids"]
             meta_df       = data["meta_df"]
@@ -486,27 +622,26 @@ def main(args: argparse.Namespace) -> None:
         log.info(f"   ✔ {total_snapshots} snapshots → correlation_snapshots")
         log.info(f"   ✔ ~{total_corr_rows:,} rows → node_correlations")
         log.info(f"   ⏱ Tổng: {grand_total:.0f}s = {grand_total/60:.1f} phút")
-        log.info(f"   📐 Data root: {data_root.resolve()}")
         log.info(f"   🌟 Active snapshot: pred_idx=0 của h{horizon_dirs[0][0]}")
         log.info("=" * 70)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Seed DMFM correlation từ ml_workspace/data/test vào PostgreSQL"
+        description="Seed DMFM correlation từ ml_workspace/data/dmfm_predictions/test vào PostgreSQL"
     )
     parser.add_argument(
         "--data-root",
-        default=str(DEFAULT_DATA_ROOT),
+        default=None,
         help=(
-            f"Thư mục gốc chứa h1/, h3/, h6/, h9/ (default: {DEFAULT_DATA_ROOT}). "
-            "Trong tương lai có thể là s3://bucket/data/test"
+            "Thư mục gốc chứa h1/, h3/... (S3 URL hoặc local path). "
+            "Mặc định tự động thử S3 trước, fallback về local."
         ),
     )
     parser.add_argument(
         "--graph-structure",
         default=None,
-        help="Path tới graph_structure_*.npz (default: tự tìm file mới nhất trong ml_workspace/data/)",
+        help="Path tới graph_structure_*.npz (S3 URL hoặc local). Mặc định thử S3 trước, fallback local.",
     )
     parser.add_argument(
         "--db-url",
