@@ -39,6 +39,11 @@ class User(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_login_at: datetime | None = Field(default=None)
 
+    # Forgot password
+    reset_password_code_hash: str | None = Field(default=None, max_length=255)
+    reset_password_code_expires_at: datetime | None = Field(default=None)
+    reset_password_code_attempts: int = Field(default=0)
+
     # Relationship - SQLModel tự JOIN khi cần
     refresh_tokens: list["RefreshToken"] = Relationship(
         back_populates="user", sa_relationship_kwargs={"cascade": "all, delete-orphan"}

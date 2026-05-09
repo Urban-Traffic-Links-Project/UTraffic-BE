@@ -52,6 +52,13 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+    # ── Reset Password ───────────────────────────────────────────
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str
+    smtp_password: str
+    smtp_from_email: str
+    secret_key: str
 
 
 # print(f"[CONFIG] chạy thành công {BASE_URL}")

@@ -35,6 +35,18 @@ class RefreshTokenRequest(SQLModel):
     refresh_token: str
 
 
+class ForgotPasswordSendCodeRequest(SQLModel):
+    """Body của POST /auth/forgot-password/send-code"""
+    email: EmailStr
+
+
+class ForgotPasswordResetRequest(SQLModel):
+    """Body của POST /auth/forgot-password/reset"""
+    email: EmailStr
+    code: str
+    new_password: str
+
+
 # ════════════════════════════════════════════════════════════
 # RESPONSE schemas — dữ liệu SERVER trả VỀ
 # ════════════════════════════════════════════════════════════
