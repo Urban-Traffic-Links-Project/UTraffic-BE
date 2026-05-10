@@ -14,9 +14,11 @@ from src.storage.models.auth import RefreshToken, User, UserSession
 # Nhóm 5: Correlation (phụ thuộc ModelVersion, Node)
 from src.storage.models.correlation import (
     CorrelationSnapshot,
+    EdgeCorrelation,
     NodeCorrelation,
     NodeCorrelationCache,
 )
+from src.storage.models.incident import Incident, IncidentEdge
 from src.storage.models.graph import (
     Edge,
     GraphSnapshot,
@@ -59,4 +61,8 @@ __all__ = [
     "CorrelationSnapshot",
     "NodeCorrelation",
     "NodeCorrelationCache",
+    "EdgeCorrelation",
+    # Incidents
+    "Incident",
+    "IncidentEdge",
 ]

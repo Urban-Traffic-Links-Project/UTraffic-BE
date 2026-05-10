@@ -25,6 +25,7 @@ dependencies = [
     "argon2-cffi>=23.1.0",               # Băm mật khẩu chuẩn vàng (thay bcrypt)
     # --- Config & Validation ---
     "pydantic-settings>=2.2.0",          # Đọc biến môi trường từ .env có type-check
+    "email-validator>=2.2.0",            # Required by Pydantic EmailStr
     # --- Utilities ---
     "python-multipart>=0.0.9",           # Xử lý Form Data / Upload file
     "redis>=5.0.0",                      # Redis client (async support)

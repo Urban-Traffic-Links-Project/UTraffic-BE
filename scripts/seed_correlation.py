@@ -11,6 +11,7 @@ Pipeline:
        R_t (3696×3696) → bridge → node_corr (1980×1980)
        → insert correlation_snapshot (mode = "YYYY-MM-DD_Slot_HHMM")
          + node_correlations rows (top-K per node)
+         + edge_correlations rows (top-K per segment, trực tiếp từ R_t)
 
 DATA_ROOT mặc định: BE/ml_workspace/data/dmfm_predictions/test/
   └── h1/
@@ -392,6 +393,63 @@ def fetch_db_lookups(session: Session) -> tuple:
     return osm_to_uuid, adj_set
 
 
+def fetch_segment_to_edge_map(
+    session: Session,
+    seg_ids: np.ndarray,
+    gs_s3_key: str,
+    gs_local_path: Path,
+) -> dict[int, uuid.UUID]:
+    """
+    Build map: segment_pos (vị trí trong seg_ids) → OSM edge UUID.
+
+    Mapping logic (không dùng tomtom_segments — bảng đó thường trống):
+      seg_ids[pos] = model_node_id (0..N-1)
+      graph_structure['model_node_osm_u_id'][model_node_id] = u_osm
+      graph_structure['model_node_osm_v_id'][model_node_id] = v_osm
+      DB: edges JOIN nodes → (u_osm, v_osm) → edge UUID
+
+    Trả về {pos: edge_uuid} — chỉ các pos có OSM edge tương ứng.
+    """
+    # 1. Load graph_structure để lấy (u_osm, v_osm) cho mỗi model_node_id
+    gs_raw = load_s3_or_local_npz(gs_s3_key, gs_local_path)
+    model_u = gs_raw["model_node_osm_u_id"]   # shape (N_model_segs,)
+    model_v = gs_raw["model_node_osm_v_id"]   # shape (N_model_segs,)
+
+    # 2. Lấy toàn bộ (u_osm, v_osm) → edge UUID từ DB
+    edge_rows = session.execute(
+        text("""
+            SELECT e.id, n_src.osm_node_id AS u, n_tgt.osm_node_id AS v
+            FROM edges e
+            JOIN nodes n_src ON n_src.id = e.source_node_id
+            JOIN nodes n_tgt ON n_tgt.id = e.target_node_id
+        """)
+    ).fetchall()
+
+    uv_to_edge: dict[tuple[int, int], uuid.UUID] = {}
+    for edge_uuid, u_osm, v_osm in edge_rows:
+        uv_to_edge[(int(u_osm), int(v_osm))] = uuid.UUID(str(edge_uuid))
+
+    # 3. Xây dựng map pos → edge UUID
+    pos_to_edge: dict[int, uuid.UUID] = {}
+    for pos, model_node_id in enumerate(seg_ids):
+        mn = int(model_node_id)
+        if mn >= len(model_u):
+            continue
+        u = int(model_u[mn])
+        v = int(model_v[mn])
+        edge_uuid = uv_to_edge.get((u, v))
+        if edge_uuid is not None:
+            pos_to_edge[pos] = edge_uuid
+
+    matched = len(pos_to_edge)
+    total   = len(seg_ids)
+    log.info(
+        f"  ✓ segment→edge map: {matched}/{total} segments có OSM edge "
+        f"({100*matched//total if total else 0}%)"
+    )
+    return pos_to_edge
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # BƯỚC 5: Insert 1 snapshot
 # ═════════════════════════════════════════════════════════════════════════════
@@ -406,8 +464,8 @@ def insert_one_snapshot(
     adj_set:      set[tuple[int, int]],
     top_k:        int,
     is_active:    bool,
-) -> uuid.UUID:
-    """Insert 1 correlation_snapshot + node_correlations rows."""
+) -> tuple[uuid.UUID, int]:
+    """Insert 1 correlation_snapshot + node_correlations rows. Trả về (snapshot_id, n_corr_rows)."""
     n_nodes = len(osm_node_ids)
     now = datetime.now(timezone.utc)
     snapshot_id = uuid.uuid4()
@@ -483,7 +541,67 @@ def insert_one_snapshot(
         )
 
     session.flush()
-    return snapshot_id
+    return snapshot_id, len(corr_batch)
+
+
+def insert_edge_correlations(
+    session:       Session,
+    snapshot_id:   uuid.UUID,
+    R_t:           np.ndarray,          # (n_segs, n_segs) — R_t thô
+    pos_to_edge:   dict[int, uuid.UUID], # segment_pos → edge UUID
+    top_k:         int,
+) -> int:
+    """
+    Insert top-K edge correlations từ R_t thô.
+    Mỗi segment A → top-K segment B theo |corr| giảm dần.
+    Bỏ qua self-correlation (A=B).
+    Trả về số rows đã insert.
+    """
+    n_segs = R_t.shape[0]
+    now = datetime.now(timezone.utc)
+    edge_batch: list[dict] = []
+
+    for seg_a in range(n_segs):
+        corr_row = R_t[seg_a].copy().astype(np.float32)
+        corr_row[seg_a] = -2.0   # loại self
+
+        top_indices = np.argsort(-np.abs(corr_row))[:top_k]
+
+        for rank, seg_b in enumerate(top_indices):
+            val = float(corr_row[seg_b])
+            if val <= -2.0:
+                continue
+
+            edge_batch.append({
+                "id":                str(uuid.uuid4()),
+                "snapshot_id":       str(snapshot_id),
+                "segment_a_pos":     int(seg_a),
+                "segment_b_pos":     int(seg_b),
+                "edge_a_id":         str(pos_to_edge[seg_a]) if seg_a in pos_to_edge else None,
+                "edge_b_id":         str(pos_to_edge[seg_b]) if seg_b in pos_to_edge else None,
+                "correlation_value": round(val, 6),
+                "rank_from_a":       rank + 1,
+                "created_at":        now,
+            })
+
+    BATCH = 5000
+    for i in range(0, len(edge_batch), BATCH):
+        session.execute(
+            text("""
+                INSERT INTO edge_correlations
+                  (id, snapshot_id, segment_a_pos, segment_b_pos,
+                   edge_a_id, edge_b_id,
+                   correlation_value, rank_from_a, created_at)
+                VALUES
+                  (:id, :snapshot_id, :segment_a_pos, :segment_b_pos,
+                   :edge_a_id, :edge_b_id,
+                   :correlation_value, :rank_from_a, :created_at)
+            """),
+            edge_batch[i: i + BATCH],
+        )
+
+    session.flush()
+    return len(edge_batch)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -541,16 +659,18 @@ def main(args: argparse.Namespace) -> None:
     with Session(engine) as session:
         # ── Dọn sạch toàn bộ dữ liệu cũ ─────────────────────────────────────
         log.info("🧹 Xóa dữ liệu correlation cũ...")
+        deleted_ec = session.execute(text("DELETE FROM edge_correlations")).rowcount
         deleted_nc = session.execute(text("DELETE FROM node_correlations")).rowcount
         deleted_cs = session.execute(text("DELETE FROM correlation_snapshots")).rowcount
         session.commit()
-        log.info(f"  ✓ Đã xóa {deleted_cs} snapshots, {deleted_nc:,} node_correlations rows")
+        log.info(f"  ✓ Đã xóa {deleted_cs} snapshots, {deleted_nc:,} node_correlations, {deleted_ec:,} edge_correlations rows")
 
         # Load DB lookups (dùng chung cho tất cả horizons)
         osm_to_uuid, adj_set = fetch_db_lookups(session)
 
-        total_snapshots  = 0
-        total_corr_rows  = 0
+        total_snapshots      = 0
+        total_corr_rows      = 0
+        total_edge_corr_rows = 0
         grand_t0 = time.time()
         first_snapshot   = True   # snapshot đầu tiên trên tất cả horizons → is_active
 
@@ -571,6 +691,14 @@ def main(args: argparse.Namespace) -> None:
             # Build incident matrix (1 lần per horizon, seg_ids có thể khác)
             W, _, osm_node_ids = build_incident_matrix(gs, seg_ids)
 
+            # Build segment → edge map (1 lần per horizon)
+            pos_to_edge = fetch_segment_to_edge_map(
+                session       = session,
+                seg_ids       = seg_ids,
+                gs_s3_key     = gs_s3_key,
+                gs_local_path = gs_local_path,
+            )
+
             horizon_t0 = time.time()
 
             for pred_idx in range(n_snapshots):
@@ -589,7 +717,7 @@ def main(args: argparse.Namespace) -> None:
                 R_t = np.array(R_pred_series[pred_idx], dtype=np.float32)
                 node_corr = bridge_edge_to_node(R_t, W)
 
-                snap_id = insert_one_snapshot(
+                snap_id, n_node_rows = insert_one_snapshot(
                     session      = session,
                     mode_key     = mode_key,
                     horizon      = horizon_int,
@@ -601,13 +729,24 @@ def main(args: argparse.Namespace) -> None:
                     is_active    = is_active,
                 )
 
+                n_edge_rows = insert_edge_correlations(
+                    session     = session,
+                    snapshot_id = snap_id,
+                    R_t         = R_t,
+                    pos_to_edge = pos_to_edge,
+                    top_k       = args.top_k,
+                )
+
                 session.commit()
-                total_snapshots += 1
-                total_corr_rows += args.top_k * len(osm_to_uuid)
+                total_snapshots      += 1
+                total_corr_rows      += n_node_rows
+                total_edge_corr_rows += n_edge_rows
 
                 corr_vals = node_corr[node_corr < 1.0]
                 log.info(
                     f"    ✓ {str(snap_id)[:8]}... | "
+                    f"node_corr={n_node_rows:,} rows | "
+                    f"edge_corr={n_edge_rows:,} rows | "
                     f"mean={corr_vals.mean():.4f} | "
                     f"{time.time()-t0:.1f}s"
                     + (" 🌟 (active)" if is_active else "")
@@ -620,7 +759,8 @@ def main(args: argparse.Namespace) -> None:
         log.info("=" * 70)
         log.info("✅ Hoàn tất!")
         log.info(f"   ✔ {total_snapshots} snapshots → correlation_snapshots")
-        log.info(f"   ✔ ~{total_corr_rows:,} rows → node_correlations")
+        log.info(f"   ✔ {total_corr_rows:,} rows → node_correlations")
+        log.info(f"   ✔ {total_edge_corr_rows:,} rows → edge_correlations")
         log.info(f"   ⏱ Tổng: {grand_total:.0f}s = {grand_total/60:.1f} phút")
         log.info(f"   🌟 Active snapshot: pred_idx=0 của h{horizon_dirs[0][0]}")
         log.info("=" * 70)

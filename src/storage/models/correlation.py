@@ -4,6 +4,7 @@ Nhóm bảng phân tích tương quan — tính năng cốt lõi của UTraffic:
   - correlation_snapshots     : metadata mỗi lần chạy correlation job
   - node_correlations         : các cặp node có |corr| >= 0.7
   - node_correlation_cache    : JSONB blob top-20 neighbors per node (tối ưu click)
+  - edge_correlations         : tương quan trực tiếp giữa các segment (edge ML model)
 """
 
 import uuid
@@ -103,3 +104,38 @@ class NodeCorrelationCache(SQLModel, table=True):
         sa_column=Column(JSONB),
     )
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ════════════════════════════════════════════════════════════
+# Bảng 17: edge_correlations
+# Tương quan trực tiếp giữa các ML segment (dùng R_t thô, không qua bridge)
+# segment_a_pos / segment_b_pos: vị trí trong seg_ids (0-indexed)
+# edge_a_id / edge_b_id: FK sang edges nếu segment đó được map sang OSM edge
+# ════════════════════════════════════════════════════════════
+class EdgeCorrelation(SQLModel, table=True):
+    """
+    1 bản ghi = 1 cặp segment (vị trí trong R_t) có tương quan đáng kể.
+
+    segment_a_pos: vị trí segment A trong mảng seg_ids (tương ứng hàng/cột R_t)
+    segment_b_pos: vị trí segment B
+    edge_a_id    : UUID OSM edge tương ứng với segment A (nếu đã map-match)
+    edge_b_id    : UUID OSM edge tương ứng với segment B (nếu đã map-match)
+    rank_from_a  : thứ hạng B trong top-K neighbors của A (theo |corr|)
+    """
+
+    __tablename__ = "edge_correlations"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    snapshot_id: uuid.UUID = Field(foreign_key="correlation_snapshots.id", index=True)
+
+    # Vị trí trong R_t matrix (luôn có)
+    segment_a_pos: int = Field(index=True)
+    segment_b_pos: int = Field(index=True)
+
+    # OSM edge UUID (nullable — chỉ có khi segment đã được map sang OSM edge)
+    edge_a_id: uuid.UUID | None = Field(default=None, foreign_key="edges.id", index=True)
+    edge_b_id: uuid.UUID | None = Field(default=None, foreign_key="edges.id", index=True)
+
+    correlation_value: float  # Giá trị trong [-1, 1] (từ R_t thô)
+    rank_from_a: int | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

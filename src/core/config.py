@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     # ── ML Engine ───────────────────────────────────────────
     ml_workspace_path: str = "./ml_workspace"
 
+    # ── TomTom ──────────────────────────────────────────────
+    tomtom_api_key: str | None = None
+    tomtom_base_url: str = "https://api.tomtom.com"
+    # Fixed bbox for IncidentDetails v5: minLon,minLat,maxLon,maxLat (EPSG:4326)
+    tomtom_incident_bbox: str = "106.67422,10.75863,106.71737,10.80598"
+    tomtom_incident_language: str = "en-GB"
+    tomtom_incident_time_validity_filter: str = "present"
+
     # ── PostgreSQL ───────────────────────────────────────────
     model_config = SettingsConfigDict(
         env_file=ENV_FILE,

@@ -1,14 +1,14 @@
 """
 scripts/seed_graph.py
 =====================
-Nạp 1980 intersection nodes (ngã ba/ngã tư thật) và edges vào bảng
+Nạp all intersection nodes (ngã ba/ngã tư thật) và edges vào bảng
 `nodes` + `edges` trong PostgreSQL.
 
 Nguồn dữ liệu (theo thứ tự ưu tiên):
   ┌─────────────────────────────────────────────────────────────────┐
   │  Trường          │  Nguồn                                       │
   ├─────────────────────────────────────────────────────────────────┤
-  │  osm_node_id     │  gs['osm_node_ids']  (1980 matched nodes)    │
+  │  osm_node_id     │  gs['osm_node_ids']  (all matched nodes)    │
   │  lat, lon        │  og['coordinates']   (tọa độ thật từ OSM)    │
   │  degree (thật)   │  graphml G.degree()  (in+out, không norm)    │
   │  betweenness     │  og['node_features'][:, 3]  (đã norm)        │
@@ -17,7 +17,7 @@ Nguồn dữ liệu (theo thứ tự ưu tiên):
   └─────────────────────────────────────────────────────────────────┘
 
 Tại sao KHÔNG dùng graph_structure cho nodes?
-  - graph_structure['osm_node_ids'] = 1980 intersection nodes ✓ (cùng tập)
+  - graph_structure['osm_node_ids'] = all intersection nodes ✓ (cùng tập)
   - NHƯNG node_features['degree'] là giá trị normalized [0,1] → hiển thị sai
   - graph_structure model_node_mid_lat/lon là midpoint đoạn đường → tọa độ sai
 
@@ -66,7 +66,7 @@ def load_sources(gs_path: str, og_path: str, graphml_path: str) -> dict:
     Load và validate 3 nguồn dữ liệu. Trả về dict hợp nhất.
 
     Đầu ra:
-      nodes: list[dict] — 1980 intersection nodes đầy đủ thông tin
+      nodes: list[dict] — all intersection nodes đầy đủ thông tin
       edges: list[dict] — các directed edges giữa các nodes trong tập 1980
     """
     for p in [gs_path, og_path, graphml_path]:
@@ -100,7 +100,7 @@ def load_sources(gs_path: str, og_path: str, graphml_path: str) -> dict:
     G = nx.read_graphml(graphml_path)
     log.info(f"  ✓ {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
 
-    # ── Tổng hợp thông tin cho 1980 nodes ────────────────────────────────────
+    # ── Tổng hợp thông tin cho all nodes ────────────────────────────────────
     log.info("🔄 Aggregating node attributes ...")
 
     # street_name: tên đường xuất hiện nhiều nhất trong các edge kề với node
@@ -192,7 +192,7 @@ def load_sources(gs_path: str, og_path: str, graphml_path: str) -> dict:
         src_osm_id = int(og_node_ids[src_idx])
         tgt_osm_id = int(og_node_ids[tgt_idx])
 
-        # Chỉ giữ edge nếu cả 2 endpoint thuộc tập 1980 matched nodes
+        # Chỉ giữ edge nếu cả 2 endpoint thuộc tập all matched nodes
         if src_osm_id not in gs_set or tgt_osm_id not in gs_set:
             continue
 
@@ -254,7 +254,7 @@ def upsert_graph_snapshot(session: Session, n_nodes: int, n_edges: int) -> uuid.
 
 def upsert_nodes(session: Session, nodes: list[dict]) -> dict[int, uuid.UUID]:
     """
-    Upsert 1980 intersection nodes vào bảng `nodes`.
+    Upsert all intersection nodes vào bảng `nodes`.
     Trả về mapping osm_node_id → DB UUID (dùng cho bước seed edges).
     """
     log.info(f"💾 Upserting {len(nodes)} nodes ...")
