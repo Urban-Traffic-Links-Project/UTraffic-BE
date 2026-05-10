@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     smtp_password: str
     smtp_from_email: str
     secret_key: str
+    # ── TomTom api ───────────────────────────────────────────
+    tomtom_api_key: str | None = None
 
 
 # print(f"[CONFIG] chạy thành công {BASE_URL}")

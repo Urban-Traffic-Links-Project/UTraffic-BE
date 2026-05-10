@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.core.config import get_settings
+from src.core.scheduler import start_scheduler, stop_scheduler
 
 settings = get_settings()
 
@@ -32,9 +33,11 @@ async def lifespan(app: FastAPI):
     from src.storage.database import create_db_and_tables
     create_db_and_tables()
     print("✅ Database đã sẵn sàng")
+    start_scheduler()
     
     yield
- 
+
+    stop_scheduler()
     # Tắt server
     print("👋 UTraffic API đang tắt...")
     
