@@ -28,6 +28,11 @@ from src.core.security import (
 )
 from src.core.config import get_settings
 from src.storage.models.auth import RefreshToken, User, UserSession
+import hashlib
+import secrets
+import smtplib
+from email.message import EmailMessage
+from fastapi import HTTPException, status
 
 settings = get_settings()
 
@@ -202,4 +207,154 @@ def _revoke_all_user_tokens(session: Session, user_id: uuid.UUID) -> None:
         token.is_revoked = True
         token.revoked_at = now
         session.add(token)
+    session.commit()
+
+
+def _generate_reset_code() -> str:
+    """Tạo mã OTP 6 số."""
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def _hash_reset_code(code: str) -> str:
+    """
+    Hash mã reset password.
+    Không nên lưu mã plain text trong DB.
+    """
+    raw = f"{settings.secret_key}:{code}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _send_reset_password_email(to_email: str, code: str) -> None:
+    """
+    Gửi mã reset password qua SMTP.
+    Cần cấu hình SMTP trong settings/.env.
+    """
+    subject = "HCMTraffic - Mã xác thực đổi mật khẩu"
+
+    body = f"""
+Xin chào,
+
+Mã xác thực đổi mật khẩu của bạn là: {code}
+
+Mã này có hiệu lực trong 10 phút.
+Nếu bạn không yêu cầu đổi mật khẩu, vui lòng bỏ qua email này.
+
+HCMTraffic
+""".strip()
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = settings.smtp_from_email
+    message["To"] = to_email
+    message.set_content(body)
+
+    with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
+        server.starttls()
+        server.login(settings.smtp_user, settings.smtp_password)
+        server.send_message(message)
+
+
+def send_forgot_password_code(session: Session, email: str) -> None:
+    """
+    Gửi mã xác thực quên mật khẩu.
+
+    Lưu ý bảo mật:
+    - Không báo email có tồn tại hay không.
+    - Nếu email không tồn tại vẫn trả success.
+    """
+    user = get_user_by_email(session, email)
+
+    if not user or not user.is_active:
+        return
+
+    code = _generate_reset_code()
+
+    user.reset_password_code_hash = _hash_reset_code(code)
+    user.reset_password_code_expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    user.reset_password_code_attempts = 0
+
+    session.add(user)
+    session.commit()
+
+    _send_reset_password_email(to_email=user.email, code=code)
+
+
+def reset_password_with_code(
+    session: Session,
+    email: str,
+    code: str,
+    new_password: str,
+) -> None:
+    """
+    Xác thực mã OTP và đổi mật khẩu.
+    """
+    if len(new_password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Mật khẩu mới phải có ít nhất 8 ký tự.",
+        )
+
+    user = get_user_by_email(session, email)
+
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mã xác thực không hợp lệ hoặc đã hết hạn.",
+        )
+
+    if not user.reset_password_code_hash or not user.reset_password_code_expires_at:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mã xác thực không hợp lệ hoặc đã hết hạn.",
+        )
+
+    expires_at = user.reset_password_code_expires_at
+
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if expires_at < datetime.now(timezone.utc):
+        user.reset_password_code_hash = None
+        user.reset_password_code_expires_at = None
+        user.reset_password_code_attempts = 0
+        session.add(user)
+        session.commit()
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mã xác thực không hợp lệ hoặc đã hết hạn.",
+        )
+
+    if user.reset_password_code_attempts >= 5:
+        user.reset_password_code_hash = None
+        user.reset_password_code_expires_at = None
+        user.reset_password_code_attempts = 0
+        session.add(user)
+        session.commit()
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Bạn đã nhập sai quá số lần cho phép. Vui lòng gửi lại mã mới.",
+        )
+
+    if _hash_reset_code(code.strip()) != user.reset_password_code_hash:
+        user.reset_password_code_attempts += 1
+        session.add(user)
+        session.commit()
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mã xác thực không hợp lệ hoặc đã hết hạn.",
+        )
+
+    user.password_hash = hash_password(new_password)
+    user.reset_password_code_hash = None
+    user.reset_password_code_expires_at = None
+    user.reset_password_code_attempts = 0
+
+    session.add(user)
+
+    # Đổi mật khẩu xong thì thu hồi các refresh token cũ để bắt đăng nhập lại.
+    _revoke_all_user_tokens(session, user.id)
+
     session.commit()

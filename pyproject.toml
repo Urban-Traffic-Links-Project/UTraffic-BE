@@ -35,6 +35,7 @@ dependencies = [
     "scikit-learn>=1.8.0",
     "numpy>=2.4.4",
     "boto3>=1.43.6",
+    "apscheduler>=3.11.2",
 ]
 
 # ── Dev dependencies ────────────────────────────────────────────────────────

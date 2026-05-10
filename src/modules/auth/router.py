@@ -21,6 +21,8 @@ from src.modules.auth.schemas import (
     RegisterRequest,
     TokenResponse,
     UserResponse,
+    ForgotPasswordSendCodeRequest,
+    ForgotPasswordResetRequest,
 )
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -112,6 +114,43 @@ def logout(body: RefreshTokenRequest, session: DbSession):
     """
     service.logout(session=session, raw_refresh_token=body.refresh_token)
     return MessageResponse(message="Đăng xuất thành công")
+
+
+@router.post("/forgot-password/send-code", response_model=MessageResponse)
+def forgot_password_send_code(
+    body: ForgotPasswordSendCodeRequest,
+    session: DbSession,
+):
+    """
+    Gửi mã xác thực đổi mật khẩu qua email.
+    Luôn trả success để tránh lộ email có tồn tại hay không.
+    """
+    service.send_forgot_password_code(
+        session=session,
+        email=body.email,
+    )
+
+    return MessageResponse(
+        message="Nếu email tồn tại trong hệ thống, mã xác thực đã được gửi."
+    )
+
+
+@router.post("/forgot-password/reset", response_model=MessageResponse)
+def forgot_password_reset(
+    body: ForgotPasswordResetRequest,
+    session: DbSession,
+):
+    """
+    Xác thực mã OTP và đổi mật khẩu mới.
+    """
+    service.reset_password_with_code(
+        session=session,
+        email=body.email,
+        code=body.code,
+        new_password=body.new_password,
+    )
+
+    return MessageResponse(message="Đổi mật khẩu thành công.")
 
 
 @router.get("/me", response_model=UserResponse)
