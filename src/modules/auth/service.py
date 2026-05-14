@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlmodel import Session, select
+from sqlalchemy import func, or_
 
 from src.core.exceptions import (
     CredentialsException,
@@ -27,7 +28,7 @@ from src.core.security import (
     verify_password,
 )
 from src.core.config import get_settings
-from src.storage.models.auth import RefreshToken, User, UserSession
+from src.storage.models.auth import RefreshToken, User, UserRole, UserSession
 import hashlib
 import secrets
 import smtplib
@@ -119,9 +120,11 @@ def login(session: Session, email: str, password: str, ip: str | None = None, de
     4. Lưu refresh token vào DB
     5. Trả về tokens
     """
-    # Bước 1+2: tìm user và xác thực password
+    # Bước 1+2: tìm user, xác thực password và kiểm tra trạng thái tài khoản.
+    # Với tài khoản bị khóa, vẫn trả cùng CredentialsException như sai email/password
+    # để không lộ trạng thái tài khoản cho người thử đăng nhập.
     user = get_user_by_email(session, email)
-    if not user or not verify_password(password, user.password_hash):
+    if not user or not verify_password(password, user.password_hash) or not user.is_active:
         raise CredentialsException
 
     # Cập nhật last_login_at
@@ -358,3 +361,238 @@ def reset_password_with_code(
     _revoke_all_user_tokens(session, user.id)
 
     session.commit()
+
+# ════════════════════════════════════════════════════════════
+# ADMIN USER MANAGEMENT
+# ════════════════════════════════════════════════════════════
+
+def _role_value(role) -> str:
+    """Lấy giá trị string từ UserRole enum hoặc string."""
+    return getattr(role, "value", str(role))
+
+
+def require_admin(current_user: User) -> None:
+    """Chỉ cho phép tài khoản role=admin truy cập API quản trị."""
+    if _role_value(current_user.role) != UserRole.admin.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bạn không có quyền quản trị tài khoản.",
+        )
+
+
+def _parse_user_role(role: str | UserRole) -> UserRole:
+    """Validate role admin/user."""
+    if isinstance(role, UserRole):
+        return role
+
+    normalized = str(role or "").strip().lower()
+
+    try:
+        return UserRole(normalized)
+    except ValueError:
+        allowed = ", ".join(item.value for item in UserRole)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Role không hợp lệ. Chỉ hỗ trợ: {allowed}.",
+        )
+
+
+def _admin_user_to_dict(user: User) -> dict:
+    """Convert User model sang response dict, tránh trả password_hash."""
+    return {
+        "id": user.id,
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": _role_value(user.role),
+        "is_active": user.is_active,
+        "created_at": user.created_at,
+        "last_login_at": user.last_login_at,
+    }
+
+
+def admin_list_users(
+    session: Session,
+    search: str | None = None,
+    role: str | None = None,
+    is_active: bool | None = None,
+    skip: int = 0,
+    limit: int = 20,
+) -> dict:
+    """Danh sách user cho admin, có search/filter/pagination."""
+    limit = max(1, min(limit, 100))
+    skip = max(0, skip)
+
+    conditions = []
+
+    if search:
+        keyword = f"%{search.strip()}%"
+        conditions.append(
+            or_(
+                User.email.ilike(keyword),
+                User.full_name.ilike(keyword),
+            )
+        )
+
+    if role:
+        conditions.append(User.role == _parse_user_role(role))
+
+    if is_active is not None:
+        conditions.append(User.is_active == is_active)
+
+    total_query = select(func.count()).select_from(User)
+    list_query = select(User)
+
+    for condition in conditions:
+        total_query = total_query.where(condition)
+        list_query = list_query.where(condition)
+
+    total = session.exec(total_query).one()
+    users = session.exec(
+        list_query.order_by(User.created_at.desc()).offset(skip).limit(limit)
+    ).all()
+
+    return {
+        "total": int(total or 0),
+        "skip": skip,
+        "limit": limit,
+        "items": [_admin_user_to_dict(user) for user in users],
+    }
+
+
+def admin_get_user(session: Session, user_id: uuid.UUID) -> dict:
+    """Lấy chi tiết 1 user."""
+    user = session.get(User, user_id)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy tài khoản.",
+        )
+
+    return _admin_user_to_dict(user)
+
+
+def admin_create_user(
+    session: Session,
+    email: str,
+    password: str,
+    full_name: str | None = None,
+    role: str = "user",
+    is_active: bool = True,
+) -> dict:
+    """Admin tạo tài khoản mới."""
+    if len(password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Mật khẩu phải có ít nhất 8 ký tự.",
+        )
+
+    if get_user_by_email(session, email):
+        raise EmailAlreadyExistsException
+
+    user = User(
+        email=email,
+        password_hash=hash_password(password),
+        full_name=full_name,
+        role=_parse_user_role(role),
+        is_active=is_active,
+    )
+
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    return _admin_user_to_dict(user)
+
+
+def admin_update_user(
+    session: Session,
+    user_id: uuid.UUID,
+    current_admin_id: uuid.UUID,
+    full_name: str | None = None,
+    role: str | None = None,
+    is_active: bool | None = None,
+) -> dict:
+    """Admin cập nhật full_name, role, trạng thái active."""
+    user = session.get(User, user_id)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy tài khoản.",
+        )
+
+    is_self = user.id == current_admin_id
+
+    if is_self and role is not None and _parse_user_role(role) != UserRole.admin:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Admin không thể tự hạ quyền của chính mình.",
+        )
+
+    if is_self and is_active is False:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Admin không thể tự khóa tài khoản của chính mình.",
+        )
+
+    if full_name is not None:
+        user.full_name = full_name
+
+    if role is not None:
+        user.role = _parse_user_role(role)
+
+    if is_active is not None:
+        user.is_active = is_active
+
+        if not is_active:
+            _revoke_all_user_tokens(session, user.id)
+
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    return _admin_user_to_dict(user)
+
+
+def admin_reset_user_password(
+    session: Session,
+    user_id: uuid.UUID,
+    new_password: str,
+) -> None:
+    """Admin đặt lại mật khẩu user và revoke các refresh token cũ."""
+    if len(new_password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Mật khẩu mới phải có ít nhất 8 ký tự.",
+        )
+
+    user = session.get(User, user_id)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy tài khoản.",
+        )
+
+    user.password_hash = hash_password(new_password)
+    user.reset_password_code_hash = None
+    user.reset_password_code_expires_at = None
+    user.reset_password_code_attempts = 0
+
+    session.add(user)
+    _revoke_all_user_tokens(session, user.id)
+    session.commit()
+
+
+def admin_revoke_user_sessions(session: Session, user_id: uuid.UUID) -> None:
+    """Admin thu hồi toàn bộ phiên đăng nhập của user."""
+    user = session.get(User, user_id)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy tài khoản.",
+        )
+
+    _revoke_all_user_tokens(session, user.id)
