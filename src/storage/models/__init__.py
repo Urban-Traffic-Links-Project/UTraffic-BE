@@ -36,6 +36,12 @@ from src.storage.models.graph import (
 # Nhóm 3: Traffic (phụ thuộc Edge)
 from src.storage.models.traffic import HourlyTrafficStat, TrafficObservation
 
+# Nhóm 6: Traffic Dashboard
+from src.storage.models.traffic_dashboard import (
+    TrafficMonitoredSegment,
+    TrafficSnapshot,
+)
+
 __all__ = [
     # Graph
     "GraphSnapshot",
@@ -59,4 +65,7 @@ __all__ = [
     "CorrelationSnapshot",
     "NodeCorrelation",
     "NodeCorrelationCache",
+    # Traffic Dashboard
+    "TrafficMonitoredSegment",
+    "TrafficSnapshot",
 ]
