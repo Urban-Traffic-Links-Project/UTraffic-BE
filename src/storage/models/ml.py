@@ -9,8 +9,12 @@ Nhóm bảng học máy và phiên bản mô hình:
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from sqlmodel import Column, DateTime, Field, Relationship, SQLModel
+
+if TYPE_CHECKING:
+    from .graph import GraphSnapshot
 
 
 class CongestionLabel(str, Enum):

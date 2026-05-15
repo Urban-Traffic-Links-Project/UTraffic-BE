@@ -15,6 +15,10 @@ from geoalchemy2 import Geometry
 from sqlalchemy import Column
 from sqlmodel import BigInteger, Field, Relationship, SQLModel
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .ml import ModelVersion
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BẢNG 4: graph_snapshots
@@ -35,6 +39,11 @@ class GraphSnapshot(SQLModel, table=True):
     npz_path: str | None = Field(default=None, max_length=500)  # Path tới file .npz
     is_active: bool = Field(default=False)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # Relationships
+    model_versions: list["ModelVersion"] = Relationship(
+        back_populates="snapshot", sa_relationship_kwargs={"cascade": "all, delete-orphan"}
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -15,6 +15,10 @@ from sqlalchemy import Column
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, Relationship, SQLModel
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .ml import ModelVersion
+
 
 # ════════════════════════════════════════════════════════════
 # Bảng 14: correlation_snapshots
@@ -40,6 +44,10 @@ class CorrelationSnapshot(SQLModel, table=True):
     npz_path: str | None = Field(default=None, max_length=500)
     is_active: bool = Field(default=False)
     computed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # Relationships
+    model_version_id: uuid.UUID | None = Field(default=None, foreign_key="model_versions.id")
+    model_version: "ModelVersion" = Relationship(back_populates="correlation_snapshots")
 
 
 # ════════════════════════════════════════════════════════════
