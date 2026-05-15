@@ -41,6 +41,12 @@ from src.storage.models.correlation import (
 # Nhóm 6: Incidents (phụ thuộc Edge)
 from src.storage.models.incident import Incident, IncidentEdge
 
+# Nhóm 6: Traffic Dashboard
+from src.storage.models.traffic_dashboard import (
+    TrafficMonitoredSegment,
+    TrafficSnapshot,
+)
+
 __all__ = [
     # Graph
     "GraphSnapshot",
@@ -68,4 +74,7 @@ __all__ = [
     # Incidents
     "Incident",
     "IncidentEdge",
+    # Traffic Dashboard
+    "TrafficMonitoredSegment",
+    "TrafficSnapshot",
 ]
