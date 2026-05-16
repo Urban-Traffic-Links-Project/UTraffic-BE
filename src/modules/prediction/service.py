@@ -7,14 +7,66 @@ from sqlalchemy import text
 from sqlmodel import Session
 from fastapi import HTTPException
 from functools import lru_cache
+from src.core.config import get_settings
+from src.storage.aws.s3_client import get_s3_client
 
-@lru_cache()
+@lru_cache()    
 def load_prediction_model():
-    pkl_path = Path("ml_workspace/data/sparse_tvpvar_gt_model/sparse_tvpvar_gt_model/sparse_tvpvar_g_model.pkl")
-    gs_path = Path("ml_workspace/data/graph_structure_20260427_152321.npz")
-    seg_path = Path("ml_workspace/data/sparse_tvpvar_gt_model/sparse_tvpvar_gt_model/segment_ids.npy")
+    settings = get_settings()
+    # Đảm bảo đường dẫn tới ml_workspace/data chính xác
+    base_dir = Path(settings.ml_workspace_path).resolve()
+    if base_dir.name != "data":
+        base_dir = base_dir / "data"
+
+    # Sử dụng rglob để tự động tìm file ở local bất kể cấp thư mục lồng nhau
+    pkl_matches = list(base_dir.rglob("sparse_tvpvar_g_model.pkl"))
+    seg_matches = list(base_dir.rglob("segment_ids.npy"))
     
-    if not pkl_path.exists() or not gs_path.exists() or not seg_path.exists():
+    pkl_path = pkl_matches[0] if pkl_matches else base_dir / "sparse_tvpvar_gt_model" / "sparse_tvpvar_g_model.pkl"
+    seg_path = seg_matches[0] if seg_matches else base_dir / "sparse_tvpvar_gt_model" / "segment_ids.npy"
+    
+    # S3 Keys
+    S3_MODEL_KEY = "ml-data/sparse_tvpvar_gt_model/sparse_tvpvar_g_model.pkl"
+    S3_SEG_KEY   = "ml-data/sparse_tvpvar_gt_model/segment_ids.npy"
+    S3_GS_PREFIX = "ml-data/"
+
+    # Tự động tải từ S3 nếu thiếu file hoàn toàn ở local
+    if settings.aws_access_key_id and not pkl_matches:
+        try:
+            s3 = get_s3_client()
+            if not pkl_path.exists():
+                print(f"📥 Downloading model from S3...")
+                s3.download_to_file(S3_MODEL_KEY, pkl_path)
+            if not seg_path.exists():
+                print(f"📥 Downloading segments from S3...")
+                s3.download_to_file(S3_SEG_KEY, seg_path)
+        except Exception as e:
+            print(f"⚠️ S3 Download failed: {e}")
+
+    # Tìm file graph_structure động
+    gs_matches = sorted(base_dir.glob("graph_structure_*.npz"))
+    if not gs_matches:
+         gs_matches = sorted(base_dir.rglob("graph_structure_*.npz"))
+    gs_path = gs_matches[-1] if gs_matches else None
+    
+    # Nếu vẫn thiếu GS, thử tải cái mới nhất từ S3
+    if not gs_path and settings.aws_access_key_id:
+        try:
+            s3 = get_s3_client()
+            latest_gs_key = s3.get_latest_key(S3_GS_PREFIX, ".npz")
+            if latest_gs_key:
+                gs_path = base_dir / latest_gs_key.split("/")[-1]
+                print(f"📥 Downloading graph structure from S3...")
+                s3.download_to_file(latest_gs_key, gs_path)
+        except:
+            pass
+
+    if not pkl_path.exists() or not gs_path or not seg_path.exists():
+        # Log lỗi chi tiết
+        print(f"[Model Load Error] Missing files after S3 check:")
+        print(f"  PKL: {pkl_path.exists()} (at {pkl_path})")
+        print(f"  Seg: {seg_path.exists()} (at {seg_path})")
+        print(f"  GS:  {bool(gs_path)} (found {len(gs_matches)} files)")
         return None
         
     with open(pkl_path, "rb") as f:

@@ -285,6 +285,17 @@ def fetch_match_and_save_incidents(
         if inc is not None:
             total_saved += 1
 
+    # Cleanup: Xóa các sự cố cũ hơn 2 giờ để tránh làm loãng dữ liệu
+    try:
+        from datetime import timedelta
+        cutoff = fetched_at - timedelta(hours=2)
+        session.execute(
+            text("DELETE FROM incidents WHERE fetched_at < :cutoff"),
+            {"cutoff": cutoff}
+        )
+    except Exception as e:
+        print(f"⚠️ Incident Cleanup failed: {e}")
+
     session.commit()
     return fetched_at, traffic_model_id, bbox, total_received, total_saved
 
@@ -362,18 +373,31 @@ ORDER BY i.fetched_at DESC
         matched_edges = r.get("matched_edges")
         if isinstance(matched_edges, str):
             matched_edges = json.loads(matched_edges)
+        # Đảm bảo datetime có timezone UTC để Frontend hiển thị đúng (giờ VN = UTC+7)
+        fetched_at = r["fetched_at"]
+        if fetched_at and fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+            
+        start_time = r.get("start_time")
+        if start_time and start_time.tzinfo is None:
+            start_time = start_time.replace(tzinfo=timezone.utc)
+            
+        end_time = r.get("end_time")
+        if end_time and end_time.tzinfo is None:
+            end_time = end_time.replace(tzinfo=timezone.utc)
+
         out.append(
             {
                 "id": r["id"],
                 "tomtom_incident_id": r["tomtom_incident_id"],
-                "fetched_at": r["fetched_at"],
+                "fetched_at": fetched_at,
                 "icon_category": icon_cat,
                 "icon_category_label": icon_label,
                 "magnitude_of_delay": r.get("magnitude_of_delay"),
                 "delay_seconds": r.get("delay_seconds"),
                 "time_validity": r.get("time_validity"),
-                "start_time": r.get("start_time"),
-                "end_time": r.get("end_time"),
+                "start_time": start_time,
+                "end_time": end_time,
                 "events": r.get("events_json"),
                 "raw_properties": r.get("raw_properties_json"),
                 "geometry": r.get("incident_geom"),

@@ -657,13 +657,16 @@ def main(args: argparse.Namespace) -> None:
     engine = create_engine(args.db_url, echo=False)
 
     with Session(engine) as session:
-        # ── Dọn sạch toàn bộ dữ liệu cũ ─────────────────────────────────────
-        log.info("🧹 Xóa dữ liệu correlation cũ...")
-        deleted_ec = session.execute(text("DELETE FROM edge_correlations")).rowcount
-        deleted_nc = session.execute(text("DELETE FROM node_correlations")).rowcount
-        deleted_cs = session.execute(text("DELETE FROM correlation_snapshots")).rowcount
-        session.commit()
-        log.info(f"  ✓ Đã xóa {deleted_cs} snapshots, {deleted_nc:,} node_correlations, {deleted_ec:,} edge_correlations rows")
+        # ── Dọn sạch dữ liệu cũ nếu reset=True ──────────────────────────
+        if args.reset:
+            log.info("🧹 Xóa dữ liệu correlation cũ...")
+            deleted_ec = session.execute(text("DELETE FROM edge_correlations")).rowcount
+            deleted_nc = session.execute(text("DELETE FROM node_correlations")).rowcount
+            deleted_cs = session.execute(text("DELETE FROM correlation_snapshots")).rowcount
+            session.commit()
+            log.info(f"  ✓ Đã xóa {deleted_cs} snapshots, {deleted_nc:,} node_correlations, {deleted_ec:,} edge_correlations rows")
+        else:
+            log.info("⏭ Bỏ qua bước xóa dữ liệu cũ (reset=False)")
 
         # Load DB lookups (dùng chung cho tất cả horizons)
         osm_to_uuid, adj_set = fetch_db_lookups(session)
@@ -791,6 +794,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--top-k", type=int, default=50,
         help="Số neighbors lưu per node per snapshot (default: 50)",
+    )
+    parser.add_argument(
+        "--reset", action="store_true", default=True,
+        help="Xóa dữ liệu cũ trước khi nạp mới (mặc định: True)",
+    )
+    parser.add_argument(
+        "--no-reset", action="store_false", dest="reset",
+        help="Không xóa dữ liệu cũ, nạp nối tiếp",
     )
     args = parser.parse_args()
     main(args)
