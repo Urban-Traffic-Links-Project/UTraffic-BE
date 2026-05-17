@@ -27,7 +27,7 @@ from src.storage.models.auth import User
 bearer_scheme = HTTPBearer()
 
 
-def get_current_user(
+async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
     session: Annotated[Session, Depends(get_session)],
 ) -> User:
@@ -37,8 +37,12 @@ def get_current_user(
     Flow:
       1. FastAPI lấy token từ Header: Authorization: Bearer <token>
       2. Giải mã JWT
-      3. Tìm user trong DB theo user_id trong payload
-      4. Trả về User object — route handler nhận được user đã xác thực
+      3. Kiểm tra JTI trên Redis-Auth Blacklist (logout nhanh)
+      4. Tìm user trong DB theo user_id trong payload
+      5. Trả về User object — route handler nhận được user đã xác thực
+
+    Nếu Redis không khả dụng: log cảnh báo và bỏ qua bước kiểm tra blacklist
+    (graceful degradation — không block toàn bộ API khi Redis down).
     """
     token = credentials.credentials
 
@@ -48,6 +52,21 @@ def get_current_user(
         raise TokenExpiredException from exc
     except jwt.InvalidTokenError as exc:
         raise InvalidTokenException from exc
+
+    # ── Kiểm tra Redis Blacklist (logout nhanh) ──────────────
+    jti: str | None = payload.get("jti")
+    if jti:
+        try:
+            from src.integrations.redis_client import get_redis_auth
+            redis_auth = get_redis_auth()
+            is_blacklisted = await redis_auth.exists(f"blacklist:{jti}")
+            if is_blacklisted:
+                raise InvalidTokenException
+        except InvalidTokenException:
+            raise
+        except Exception:
+            # Redis không khả dụng → bỏ qua blacklist check, không block API
+            pass
 
     user_id: str | None = payload.get("sub")
     if not user_id:

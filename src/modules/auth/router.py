@@ -6,12 +6,14 @@ Endpoints:
   POST /auth/register      → đăng ký tài khoản mới
   POST /auth/login         → đăng nhập, nhận token
   POST /auth/refresh-token → đổi refresh token lấy token mới
-  POST /auth/logout        → đăng xuất
+  POST /auth/logout        → đăng xuất (blacklist JTI trên Redis)
   GET  /auth/me            → xem thông tin bản thân (cần login)
 """
 import uuid
 
 from fastapi import APIRouter, Query, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends
 
 from src.api.dependencies import CurrentUser, DbSession
 from src.modules.auth import service
@@ -33,6 +35,9 @@ from src.modules.auth.schemas import (
 )
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+# Bearer scheme để extract token trong logout
+_bearer_scheme = HTTPBearer(auto_error=False)
 
 
 @router.post("/register", response_model=UserResponse, status_code=201)
@@ -113,13 +118,26 @@ def refresh_token(body: RefreshTokenRequest, request: Request, session: DbSessio
 
 
 @router.post("/logout", response_model=MessageResponse)
-def logout(body: RefreshTokenRequest, session: DbSession):
+async def logout(
+    body: RefreshTokenRequest,
+    session: DbSession,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+):
     """
-    Đăng xuất — thu hồi refresh token.
+    Đăng xuất — thu hồi refresh token VÀ blacklist access token JTI trên Redis.
     - 200 OK: đăng xuất thành công
+
+    Nếu client gửi kèm Authorization: Bearer <access_token>,
+    hệ thống sẽ blacklist JTI ngay lập tức (token không thể dùng dù chưa hết hạn).
     Client cần tự xóa token khỏi memory/cookie sau khi nhận response.
     """
-    service.logout(session=session, raw_refresh_token=body.refresh_token)
+    # Trích xuất JTI từ access token (nếu có)
+    access_token_str: str | None = credentials.credentials if credentials else None
+    await service.logout_with_blacklist(
+        session=session,
+        raw_refresh_token=body.refresh_token,
+        access_token_str=access_token_str,
+    )
     return MessageResponse(message="Đăng xuất thành công")
 
 

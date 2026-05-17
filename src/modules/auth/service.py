@@ -22,6 +22,7 @@ from src.core.exceptions import (
 )
 from src.core.security import (
     create_access_token,
+    decode_access_token,
     generate_refresh_token,
     hash_password,
     hash_refresh_token,
@@ -76,7 +77,7 @@ def _create_token_pair(session: Session, user: User, ip: str | None, device: str
     Hàm nội bộ: tạo cặp (access_token, refresh_token) và lưu refresh token vào DB.
     Trả về tuple (access_token_string, refresh_token_string).
     """
-    # 1. Tạo Access Token (JWT, không lưu DB)
+    # 1. Tạo Access Token (JWT, không lưu DB — có jti để blacklist khi logout)
     access_token = create_access_token({
         "sub": str(user.id),
         "role": user.role.value,
@@ -184,6 +185,8 @@ def logout(session: Session, raw_refresh_token: str) -> None:
     """
     Đăng xuất — thu hồi refresh token, tương ứng bước 20-23 trong diagram.
     Access token sẽ tự hết hạn sau 15 phút (không cần blacklist cho demo).
+
+    Dùng logout_with_blacklist() nếu muốn blacklist access token ngay lập tức.
     """
     token_hash = hash_refresh_token(raw_refresh_token)
     db_token = session.exec(
@@ -195,6 +198,48 @@ def logout(session: Session, raw_refresh_token: str) -> None:
         db_token.revoked_at = datetime.now(timezone.utc)
         session.add(db_token)
         session.commit()
+
+
+async def logout_with_blacklist(
+    session: Session,
+    raw_refresh_token: str,
+    access_token_str: str | None = None,
+) -> None:
+    """
+    Đăng xuất nâng cao — thu hồi refresh token VÀ blacklist JTI trên Redis.
+
+    Flow (theo Sequence 1 trong báo cáo):
+    1. Revoke refresh token trong PostgreSQL (is_revoked=True)
+    2. Blacklist JTI của access token trên Redis-Auth DB 0
+       - Key: blacklist:{jti}  Value: "1"  TTL: thời gian còn lại của token
+    3. Cả hai bước độc lập — nếu Redis fail, bước 1 vẫn được ghi.
+    """
+    # Bước 1: Revoke refresh token trong DB
+    logout(session, raw_refresh_token)
+
+    # Bước 2: Blacklist access token JTI trên Redis (nếu token được gửi kèm)
+    if not access_token_str:
+        return
+
+    try:
+        payload = decode_access_token(access_token_str)
+        jti: str | None = payload.get("jti")
+        exp = payload.get("exp")  # Unix timestamp
+
+        if not jti or not exp:
+            return  # Token cũ không có jti (trước khi update) — skip
+
+        # TTL = thời gian còn lại của token (giây), tối thiểu 1 giây
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        ttl = max(1, int(exp) - now_ts)
+
+        from src.integrations.redis_client import get_redis_auth
+        redis_auth = get_redis_auth()
+        await redis_auth.setex(f"blacklist:{jti}", ttl, "1")
+
+    except Exception:
+        # Redis lỗi hoặc token expired → không block logout
+        pass
 
 
 def _revoke_all_user_tokens(session: Session, user_id: uuid.UUID) -> None:

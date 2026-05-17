@@ -33,10 +33,20 @@ async def lifespan(app: FastAPI):
     from src.storage.database import create_db_and_tables
     create_db_and_tables()
     print("✅ Database đã sẵn sàng")
+
+    # Kiểm tra kết nối Redis khi khởi động
+    from src.integrations.redis_client import ping_redis
+    redis_status = await ping_redis()
+    for r_name, ok in redis_status.items():
+        icon, label = ("✅", "OK") if ok else ("⚠️ ", "UNAVAILABLE (cache disabled)")
+        print(f"{icon} Redis [{r_name}]: {label}")
     start_scheduler()
     
     yield
 
+    # Đóng Redis connection pools
+    from src.integrations.redis_client import close_redis_pools
+    await close_redis_pools()
     stop_scheduler()
     # Tắt server
     print("👋 UTraffic API đang tắt...")
@@ -61,6 +71,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── API Gateway Middleware ──────────────────────────────────────────
+from src.api.middleware.rate_limit import RateLimitMiddleware
+from src.api.middleware.request_id import RequestIDMiddleware
+app.add_middleware(RateLimitMiddleware)   # IP-based rate limiting (120 req/min)
+app.add_middleware(RequestIDMiddleware)    # X-Request-ID header cho mọi response
 
 # ── Mount API router ─────────────────────────────────────────
 from src.api.router import api_router # noqa: E402

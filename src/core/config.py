@@ -29,10 +29,11 @@ class Settings(BaseSettings):
     # ── Redis ───────────────────────────────────────────
     redis_host: str = "localhost"
     redis_port: int = 6379
-    redis_db_auth: int = 0
-    redis_db_corr: int = 1
-    redis_db_pred: int = 2
-    redis_db_api: int = 3
+    redis_db_auth: int = 0       # JWT blacklist, OTP store
+    redis_db_corr: int = 1       # Correlation cache
+    redis_db_pred: int = 2       # DMFM prediction cache
+    redis_db_api: int = 3        # nodes/edges static cache
+    redis_db_inference: int = 4  # TVP-VAR spread/cause inference cache
 
     # ── AWS S3 ───────────────────────────────────────────
     aws_access_key_id: str | None = None

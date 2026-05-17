@@ -10,6 +10,7 @@ Tại sao Argon2 thay vì bcrypt?
 import hashlib
 from pydoc import plain
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -60,11 +61,20 @@ def create_access_token(data: dict[str, Any]) -> str:
  
     Cấu trúc JWT gồm 3 phần ngăn cách bởi dấu chấm:
       Header.Payload.Signature
-    Payload chứa data + exp (expiry time)
+    Payload chứa data + exp (expiry time) + jti (unique token ID)
     Signature được ký bằng JWT_SECRET_KEY → không thể giả mạo
+
+    jti (JWT ID): UUID duy nhất cho mỗi token, dùng để blacklist
+    khi logout mà token chưa hết hạn.
     """
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes)
-    payload = {**data, "exp": expire, "type": "access"}
+    payload = {
+        **data,
+        "exp": expire,
+        "iat": datetime.now(timezone.utc),
+        "jti": str(uuid.uuid4()),  # Unique ID để blacklist khi logout
+        "type": "access",
+    }
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 

@@ -143,6 +143,23 @@ uv run uvicorn src.main:app --reload
 
 Truy cập tài liệu API tự động tại: [http://localhost:8000/docs](http://localhost:8000/docs)
 
+### Bước 6: Seed Dữ liệu (Dành cho người mới)
+Để hệ thống có dữ liệu hiển thị (đồ thị, tương quan,...), bạn cần nạp dữ liệu mẫu ban đầu. Đảm bảo Database đã khởi tạo (Bước 4) và terminal đang ở thư mục `BE/`.
+
+**1. Nạp dữ liệu cấu trúc mạng lưới giao thông (Graph Structure):**
+```bash
+uv run python scripts/seed_graph.py
+```
+*⏱ Ước tính thời gian: Rất nhanh (vài giây đến 1 phút).*
+
+**2. Nạp dữ liệu ma trận tương quan (Correlation Data):**
+Lệnh này phân tích và nạp hàng triệu dòng dữ liệu tương quan giao thông.
+*Lưu ý: Bắt buộc phải chạy `seed_graph.py` trước khi chạy lệnh này.*
+```bash
+uv run python scripts/seed_correlation.py
+```
+*⏱ Ước tính thời gian: Khoảng 10 - 20 phút (tùy thuộc vào số lượng horizon dữ liệu và phần cứng máy).*
+
 ---
 
 ## 🧹 Quản lý Code (Code Quality)
