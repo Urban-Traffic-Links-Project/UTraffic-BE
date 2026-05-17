@@ -1,0 +1,95 @@
+services:
+  db:
+    image: timescale/timescaledb-ha:pg16         # 1. Image có sẵn PostGIS + TimescaleDB
+    container_name: utraffic_db                  # 2. Đặt tên cho dễ nhận diện
+    restart: unless-stopped                      # 3. Tự động khởi động lại nếu bị lỗi (trừ khi bạn chủ động tắt)
+    
+    environment: # 4. Cài đặt các biến môi trường (Tài khoản, Mật khẩu)
+      POSTGRES_USER: ${POSTGRES_USER:-admin_utraffic} 
+      # Cú pháp ${A:-B} nghĩa là: Thử lấy biến A trong file .env, nếu không có thì dùng mặc định là B (utraffic).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-utraffic_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-utraffic_db}
+      
+    ports: # 5. Mở cổng kết nối
+      - "5433:5432" 
+      # "Cổng_máy_tính_của_bạn : Cổng_của_container". Nghĩa là bạn có thể dùng DBeaver/DataGrip kết nối vào localhost:5432.
+      
+    volumes: # 6. Gắn "ổ cứng ngoài" vào container
+      - postgres_data:/var/lib/postgresql/data   
+      # Lưu dữ liệu vào ổ 'postgres_data' để lỡ có xóa container thì dữ liệu không bị mất.
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql  
+      # Copy file SQL có sẵn ở máy bạn vào thư mục đặc biệt. Khi DB vừa chạy lên, nó sẽ tự động chạy file SQL này (thường dùng để tạo bảng).
+      
+    healthcheck: # 7. Kiểm tra sức khỏe
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-utraffic} -d ${POSTGRES_DB:-utraffic_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      # Cứ mỗi 10s sẽ gõ lệnh 'pg_isready' để xem DB đã sẵn sàng nhận kết nối chưa. Thử 5 lần.
+
+  redis:
+    image: redis:7-alpine
+    container_name: utraffic_redis
+    restart: unless-stopped
+
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # Cài đặt giới hạn RAM cho Redis là 256MB. 
+    # 'allkeys-lru' nghĩa là nếu đầy RAM, nó sẽ tự động xóa các dữ liệu cũ ít được sử dụng nhất để nhường chỗ cho dữ liệu mới.
+
+    ports:
+      - "6379:6379"
+    
+    volumes:
+      - redis_data:/data
+    
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: utraffic_api
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    
+    depends_on:
+      db:
+        condition: service_healthy # Chỉ chạy API sau khi DB đã báo 'healthy' (ở bước 2)
+      redis:
+        condition: service_healthy # Chỉ chạy API sau khi Redis đã báo 'healthy'
+
+    volumes:
+      - ./ml_workspace:/app/ml_workspace   
+      # Đồng bộ thư mục chứa model AI/Machine Learning từ máy bạn vào container.
+      
+    profiles:
+      - full
+      # Cài đặt 'Profile': Bình thường khi bạn dev code Python, bạn không muốn bật API trong Docker mà muốn chạy thẳng bằng lệnh `uvicorn` cho dễ debug. 
+      # Profile 'full' ẩn service này đi. Nó chỉ chạy khi bạn gõ lệnh ép buộc nó chạy.
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: utraffic_pgadmin
+    restart: unless-stopped
+    environment:
+      # Tài khoản dùng để đăng nhập vào trang web pgAdmin (bạn tự đặt)
+      PGADMIN_DEFAULT_EMAIL: admin@gmail.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80" # Mở ở cổng 5050 trên máy của bạn
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+volumes:
+  postgres_data:
+  redis_data:
+  pgadmin_data:
