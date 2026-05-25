@@ -89,6 +89,19 @@ services:
     volumes:
       - pgadmin_data:/var/lib/pgadmin
 
+  nginx:
+    image: nginx:alpine
+    container_name: utraffic_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - api
+
 volumes:
   postgres_data:
   redis_data:
