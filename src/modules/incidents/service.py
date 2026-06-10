@@ -135,6 +135,7 @@ def upsert_incident_and_edges(
     bbox_used: str,
     buffer_m: float = 45.0,
     limit_edges: int = 8,
+    fetched_at: datetime,
 ) -> Incident | None:
     props = tomtom_incident.get("properties") or {}
     geom = tomtom_incident.get("geometry") or {}
@@ -150,18 +151,6 @@ def upsert_incident_and_edges(
         geom_wkt = _coords_to_point_wkt(coords)
     else:
         return None
-
-    # Find existing
-    existing = (
-        session.execute(
-            text("SELECT id FROM incidents WHERE tomtom_incident_id = :tid LIMIT 1"),
-            {"tid": tomtom_id},
-        )
-        .mappings()
-        .first()
-    )
-
-    now = datetime.now(timezone.utc)
 
     # Basic normalized fields
     icon_category = props.get("iconCategory")
@@ -183,16 +172,11 @@ def upsert_incident_and_edges(
         except Exception:
             return None
 
-    inc = None
-    if existing and existing.get("id"):
-        inc = session.get(Incident, existing["id"])
+    inc = Incident(
+        tomtom_incident_id=str(tomtom_id),
+        fetched_at=fetched_at,
+    )
 
-    if not inc:
-        inc = Incident(
-            tomtom_incident_id=str(tomtom_id),
-        )
-
-    inc.fetched_at = now
     inc.traffic_model_id_t = traffic_model_id_t
     inc.bbox_used = bbox_used
     inc.icon_category = int(icon_category) if icon_category is not None else None
@@ -281,21 +265,13 @@ def fetch_match_and_save_incidents(
             bbox_used=bbox,
             buffer_m=buffer_m,
             limit_edges=limit_edges,
+            fetched_at=fetched_at,
         )
         if inc is not None:
             total_saved += 1
 
-    # Cleanup: Xóa các sự cố cũ hơn 2 giờ để tránh làm loãng dữ liệu
-    try:
-        from datetime import timedelta
-        cutoff = fetched_at - timedelta(hours=2)
-        session.execute(
-            text("DELETE FROM incidents WHERE fetched_at < :cutoff"),
-            {"cutoff": cutoff}
-        )
-    except Exception as e:
-        print(f"⚠️ Incident Cleanup failed: {e}")
-
+    # NOTE: Không xóa dữ liệu cũ — giữ lại để hỗ trợ xem lại lịch sử theo thời gian.
+    # Dữ liệu được dọn dẹp theo tây sau (nếu cần) hoặc giữ tọi 30 ngày.
     session.commit()
     return fetched_at, traffic_model_id, bbox, total_received, total_saved
 
@@ -304,17 +280,45 @@ def list_recent_incidents_with_edges_geojson(
     session: Session,
     *,
     limit: int = 50,
+    fetched_before: datetime | None = None,
+    fetched_after: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """
     Returns incidents + matched edges with GeoJSON geometry for FE.
+    Có thể lọc theo khoảng thời gian fetch.
+    Nếu không truyền khoảng thời gian, mặc định chỉ lấy mẻ (batch) sự cố mới nhất.
     """
+    if not fetched_before and not fetched_after:
+        latest_fetched = session.execute(
+            text("SELECT MAX(fetched_at) FROM incidents")
+        ).scalar()
+        if latest_fetched:
+            # Nhóm các incident thuộc cùng 1 phút với lần fetch mới nhất để lấy trọn vẹn cả batch
+            fetched_after = latest_fetched.replace(second=0, microsecond=0)
+            from datetime import timedelta as td
+            fetched_before = fetched_after + td(minutes=1)
+
+    where_clauses = []
+    params: dict[str, Any] = {"limit": limit}
+
+    if fetched_before:
+        where_clauses.append("i.fetched_at <= :fetched_before")
+        params["fetched_before"] = fetched_before
+    if fetched_after:
+        where_clauses.append("i.fetched_at >= :fetched_after")
+        params["fetched_after"] = fetched_after
+
+    where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+
     rows = session.execute(
         text(
-            """
+            f"""
 WITH inc AS (
   SELECT *
-  FROM incidents
-  ORDER BY fetched_at DESC
+  FROM incidents i
+  {where_sql}
+  ORDER BY i.fetched_at DESC
   LIMIT :limit
 ),
 edges_geo AS (
@@ -363,7 +367,7 @@ GROUP BY
 ORDER BY i.fetched_at DESC
 """
         ),
-        {"limit": limit},
+        params,
     ).mappings().all()
 
     out: list[dict[str, Any]] = []
@@ -377,11 +381,11 @@ ORDER BY i.fetched_at DESC
         fetched_at = r["fetched_at"]
         if fetched_at and fetched_at.tzinfo is None:
             fetched_at = fetched_at.replace(tzinfo=timezone.utc)
-            
+
         start_time = r.get("start_time")
         if start_time and start_time.tzinfo is None:
             start_time = start_time.replace(tzinfo=timezone.utc)
-            
+
         end_time = r.get("end_time")
         if end_time and end_time.tzinfo is None:
             end_time = end_time.replace(tzinfo=timezone.utc)
@@ -405,3 +409,87 @@ ORDER BY i.fetched_at DESC
             }
         )
     return out
+
+
+def get_incident_fetch_sessions(
+    session: Session,
+    *,
+    hours: int = 24,
+) -> list[dict[str, Any]]:
+    """
+    Trả về danh sách các thời điểm fetch trong N giờ gần nhất.
+    Mỗi entry là 1 'session' fetch (nhom theo phút).
+    """
+    from datetime import timedelta
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    rows = session.execute(
+        text("""
+            SELECT
+                DATE_TRUNC('minute', fetched_at) AS session_time,
+                COUNT(*) AS incident_count
+            FROM incidents
+            WHERE fetched_at >= :since
+            GROUP BY DATE_TRUNC('minute', fetched_at)
+            ORDER BY session_time DESC
+            LIMIT 500
+        """),
+        {"since": since},
+    ).mappings().all()
+
+    out = []
+    for r in rows:
+        t = r["session_time"]
+        if t and t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        out.append({"session_time": t, "incident_count": r["incident_count"]})
+    return out
+
+
+def get_incidents_near_time(
+    session: Session,
+    *,
+    target_dt: datetime,
+    window_minutes: int = 15,
+    limit: int = 100,
+) -> tuple[datetime | None, list[dict[str, Any]]]:
+    """
+    Tìm lô incidents được fetch gần nhất với target_dt (trong khoảng ±window_minutes).
+    Trả về (actual_fetched_at, incidents_list).
+    """
+    from datetime import timedelta
+    start = target_dt - timedelta(minutes=window_minutes)
+    end = target_dt + timedelta(minutes=window_minutes)
+
+    # Tìm fetched_at gần nhất
+    row = session.execute(
+        text("""
+            SELECT fetched_at
+            FROM incidents
+            WHERE fetched_at BETWEEN :start AND :end
+            ORDER BY ABS(EXTRACT(EPOCH FROM (fetched_at - :target))) ASC
+            LIMIT 1
+        """),
+        {"start": start, "end": end, "target": target_dt},
+    ).mappings().first()
+
+    if not row:
+        return None, []
+
+    actual_fetched_at = row["fetched_at"]
+    if actual_fetched_at and actual_fetched_at.tzinfo is None:
+        actual_fetched_at = actual_fetched_at.replace(tzinfo=timezone.utc)
+
+    # Lấy incidents có fetched_at trong cùng phút
+    minute_start = actual_fetched_at.replace(second=0, microsecond=0)
+    from datetime import timedelta as td
+    minute_end = minute_start + td(minutes=1)
+
+    incidents = list_recent_incidents_with_edges_geojson(
+        session,
+        limit=limit,
+        fetched_after=minute_start,
+        fetched_before=minute_end,
+    )
+    return actual_fetched_at, incidents
+

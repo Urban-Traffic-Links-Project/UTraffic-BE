@@ -18,7 +18,6 @@ from sqlmodel import Field, Relationship, SQLModel
 
 class Incident(SQLModel, table=True):
     __tablename__ = "incidents"
-    __table_args__ = (UniqueConstraint("tomtom_incident_id", name="uq_incidents_tomtom_id"),)
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
 

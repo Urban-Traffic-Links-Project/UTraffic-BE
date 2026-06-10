@@ -1,10 +1,14 @@
-from __future__ import annotations
-
+from datetime import datetime
 from fastapi import APIRouter, Query
 
 from src.api.dependencies import DbSession
 from src.modules.incidents import service
-from src.modules.incidents.schemas import IncidentFetchResult, IncidentListResponse
+from src.modules.incidents.schemas import (
+    IncidentFetchResult,
+    IncidentHistoryResponse,
+    IncidentListResponse,
+    IncidentSessionListResponse,
+)
 
 router = APIRouter(prefix="/incidents", tags=["Incidents"])
 
@@ -42,4 +46,30 @@ def list_incidents(
 ):
     incidents = service.list_recent_incidents_with_edges_geojson(session, limit=limit)
     return IncidentListResponse(total=len(incidents), incidents=incidents)
+
+
+@router.get("/sessions", response_model=IncidentSessionListResponse)
+def get_sessions(
+    session: DbSession,
+    hours: int = Query(default=24, ge=1, le=168),
+):
+    sessions = service.get_incident_fetch_sessions(session, hours=hours)
+    return IncidentSessionListResponse(sessions=sessions)
+
+
+@router.get("/history", response_model=IncidentHistoryResponse)
+def get_history(
+    session: DbSession,
+    target_dt: datetime = Query(..., alias="datetime", description="Target ISO datetime to query incidents around"),
+    window_minutes: int = Query(default=15, ge=1, le=180),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    actual_fetched_at, incidents = service.get_incidents_near_time(
+        session, target_dt=target_dt, window_minutes=window_minutes, limit=limit
+    )
+    return IncidentHistoryResponse(
+        actual_fetched_at=actual_fetched_at,
+        incidents=incidents,
+    )
+
 

@@ -12,7 +12,7 @@ try:
     print("Dropping problematic tables to force recreation with new columns...")
     with Session(engine) as session:
         # Danh sách các bảng cần cập nhật schema sau khi merge
-        tables_to_drop = ["users", "refresh_tokens", "user_sessions", "correlation_snapshots", "model_versions", "predictions"]
+        tables_to_drop = ["users", "refresh_tokens", "user_sessions", "correlation_snapshots", "model_versions", "predictions", "incident_edges", "incidents"]
         
         for table in tables_to_drop:
             print(f"Dropping table: {table}")
