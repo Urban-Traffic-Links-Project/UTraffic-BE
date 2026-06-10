@@ -43,3 +43,18 @@ class IncidentDto(BaseModel):
 class IncidentListResponse(BaseModel):
     total: int
     incidents: list[IncidentDto]
+
+
+class IncidentSessionDto(BaseModel):
+    session_time: datetime
+    incident_count: int
+
+
+class IncidentSessionListResponse(BaseModel):
+    sessions: list[IncidentSessionDto]
+
+
+class IncidentHistoryResponse(BaseModel):
+    actual_fetched_at: datetime | None
+    incidents: list[IncidentDto]
+

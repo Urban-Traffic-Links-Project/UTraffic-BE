@@ -18,7 +18,6 @@ from src.modules.prediction.router import router as prediction_router
 from src.modules.traffic_dashboard.router import router as traffic_dashboard_router
 from src.modules.forecast.router import router as forecast_router
 
-
 api_router = APIRouter(prefix="/api/v1")
 
 # Đăng ký các module router
@@ -29,4 +28,4 @@ api_router.include_router(storage_router)
 api_router.include_router(incidents_router)
 api_router.include_router(prediction_router)
 api_router.include_router(traffic_dashboard_router)
-api_router.include_router(forecast_router)
+api_router.include_router(forecast_router)

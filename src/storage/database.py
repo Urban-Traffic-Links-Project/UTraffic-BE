@@ -31,6 +31,20 @@ def create_db_and_tables() -> None:
     Production dùng Alembic migration thay thế.
     """
     SQLModel.metadata.create_all(engine)
+    
+    # Tạo spatial index để tăng tốc độ truy vấn không gian ST_DWithin và ST_Distance
+    from sqlalchemy import text
+    with Session(engine) as session:
+        try:
+            session.execute(text("CREATE INDEX IF NOT EXISTS idx_edges_geom ON edges USING gist (geom)"))
+            session.execute(text("CREATE INDEX IF NOT EXISTS idx_edges_geom_geog ON edges USING gist ((geom::geography))"))
+            session.execute(text("CREATE INDEX IF NOT EXISTS idx_incidents_geom ON incidents USING gist (geom)"))
+            session.commit()
+            print("✅ Đã khởi tạo các spatial indexes thành công")
+        except Exception as e:
+            session.rollback()
+            print(f"⚠️ Không thể tạo spatial indexes: {e}")
+
 
 
 def get_session() -> Generator[Session, None, None]:
